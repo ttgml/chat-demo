@@ -31,6 +31,7 @@ import {
   markPending,
   markPendingMany,
   resetSyncMeta,
+  resetSyncProgress,
   setAccountKey,
   setSessionRev,
   uploadedFileRev,
@@ -646,11 +647,21 @@ const scheduleWatchSync = () => {
  */
 const handleChange = (event: ChatChangeEvent) => {
   const config = useSyncConfig.getState()
-  // 从未配置过同步账号时不记录，避免纯本地使用积累无意义队列
-  if (!config.serverUrl || !config.username) {
-    return
-  }
   if (event.type === 'replace') {
+    // 未登录时的「删除所有对话」是本地重置，不能当成云端删除意图：
+    // 保留账号标识，清空游标/队列，重新登录后从服务端把数据拉回来。
+    // 已登录时仍然写墓碑，保证删除全部能同步到其它设备。
+    if (event.reason === 'clear' && config.token === null) {
+      void enqueue(async () => {
+        await resetSyncProgress()
+        updatePendingCount()
+      })
+      return
+    }
+    // 从未配置过同步账号时不记录，避免纯本地使用积累无意义队列
+    if (!config.serverUrl || !config.username) {
+      return
+    }
     const fromImport = event.reason === 'import'
     void enqueue(async () => {
       await reconcile(fromImport ? { resetPending: true, tombstones: false, origin: 'import' } : {})
@@ -658,6 +669,10 @@ const handleChange = (event: ChatChangeEvent) => {
         await syncOnce()
       }
     })
+    return
+  }
+  // 从未配置过同步账号时不记录，避免纯本地使用积累无意义队列
+  if (!config.serverUrl || !config.username) {
     return
   }
   if (!event.id) {

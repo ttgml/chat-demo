@@ -143,3 +143,20 @@ export const resetSyncMeta = async (): Promise<void> => {
     tx.done,
   ])
 }
+
+/**
+ * 未登录时清空本地历史：保留账号标识，但丢掉已完成同步的游标、待上传队列和附件记录。
+ * 下次登录同一账号会从 since=0 重新拉取云端数据，而不是把离线期间的「删除全部」当成
+ * 云端删除意图上传。
+ */
+export const resetSyncProgress = async (): Promise<void> => {
+  const db = await getDB()
+  const tx = db.transaction(['meta', 'sessionRev', 'pending', 'uploadedFiles'], 'readwrite')
+  await Promise.all([
+    tx.objectStore('meta').delete('lastSyncedRev'),
+    tx.objectStore('sessionRev').clear(),
+    tx.objectStore('pending').clear(),
+    tx.objectStore('uploadedFiles').clear(),
+    tx.done,
+  ])
+}
