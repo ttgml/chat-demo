@@ -69,7 +69,8 @@ const enqueue = (run: () => Promise<void>): Promise<void> => {
 const isUnauthorized = (error: unknown): boolean =>
   error instanceof SyncError && error.status === 401
 
-const isConflict = (error: unknown): boolean => error instanceof SyncError && error.status === 409
+const isConflict = (error: unknown): error is SyncError =>
+  error instanceof SyncError && error.status === 409
 
 const isNetwork = (error: unknown): boolean =>
   error instanceof SyncError && error.code === 'network'
@@ -104,9 +105,24 @@ const applyOneRemote = async (
   return true
 }
 
-/** 冲突时采用服务端版本覆盖本地（v1 会话级 LWW：服务端 rev 大者胜） */
-const adoptServerVersion = async (id: string): Promise<boolean> => {
-  const remote = await syncGetSession(id)
+type FetchedSession = Awaited<ReturnType<typeof syncGetSession>>
+
+/**
+ * 会话新鲜度：updatedAt 在每次消息落盘时都会刷新，等价于「最后一条消息的时间」；
+ * 外部归档导入的会话可能只带消息时间，因此再取最后一条消息的 createdAt 兜底。
+ */
+const freshness = (session: Session): number => {
+  let time = session.updatedAt
+  for (const message of session.messages) {
+    if (message.createdAt > time) {
+      time = message.createdAt
+    }
+  }
+  return time
+}
+
+/** 采用服务端版本覆盖本地，并丢弃该会话的待上传队列 */
+const adoptRemote = async (id: string, remote: FetchedSession): Promise<boolean> => {
   if (!(await applyOneRemote(id, remote.rev, remote.deleted, remote.session))) {
     return false
   }
@@ -114,6 +130,58 @@ const adoptServerVersion = async (id: string): Promise<boolean> => {
   // 带着更小的 rev，直接跳到它会漏拉。游标只能由 pull 阶段按页推进。
   await clearPending(id)
   return true
+}
+
+/**
+ * 以服务端当前版本为 baseRev 重新上传本地会话。
+ * revive 为 true 时允许覆盖墓碑，仅用于导入备份这类显式全量替换。
+ * 调用方需保证会话引用的附件原件已上传。
+ */
+const reupload = async (
+  id: string,
+  baseRev: number,
+  session: Session,
+  revive = false
+): Promise<void> => {
+  const { rev } = await syncPutSession(id, {
+    baseRev,
+    updatedAt: session.updatedAt,
+    session,
+    ...(revive ? { revive: true } : {}),
+  })
+  await setSessionRev(id, rev)
+  await clearPending(id)
+}
+
+/**
+ * 409 冲突：按会话内容时间决定采用哪一版，而不是无条件「服务端 rev 大者胜」。
+ * - 远端是有效会话：本地更新则以 serverRev 为 baseRev 重新上传；时间相同或服务端更新则采用远端。
+ * - 远端是墓碑：默认沿用删除；但导入备份是用户显式恢复数据的意图，允许 revive 覆盖墓碑。
+ *   否则「删除全部 → 重新导入同一份备份」会因同 id 全是墓碑而把两端一起清零。
+ * 返回值表示是否发生了「服务端版本覆盖本地」，用于汇总冲突提示。
+ */
+const resolveConflict = async (
+  id: string,
+  item: PendingItem,
+  local: Session | undefined
+): Promise<boolean> => {
+  const remote = await syncGetSession(id)
+  if (remote.deleted) {
+    if (item.origin === 'import' && local) {
+      await reupload(id, remote.rev, local, true)
+      return false
+    }
+    return adoptRemote(id, remote)
+  }
+  if (!isSessionPayload(remote.session)) {
+    // 损坏数据既不能落库也不能当成删除，保留队列等下次重试
+    return false
+  }
+  if (local && freshness(local) > freshness(remote.session)) {
+    await reupload(id, remote.rev, local)
+    return false
+  }
+  return adoptRemote(id, remote)
 }
 
 /** 上传会话引用的附件原件；本地没有原件的导入附件跳过 */
@@ -144,13 +212,13 @@ const pushOne = async (item: PendingItem): Promise<boolean> => {
     try {
       await syncDeleteSession(item.id, baseRev)
       await deleteSessionRev(item.id)
-      // 不推进全局游标，理由见 adoptServerVersion
+      // 不推进全局游标，理由见 adoptRemote
       await clearPending(item.id)
     } catch (error) {
       if (!isConflict(error)) {
         throw error
       }
-      return adoptServerVersion(item.id)
+      return resolveConflict(item.id, item, undefined)
     }
     return false
   }
@@ -185,7 +253,13 @@ const pushOne = async (item: PendingItem): Promise<boolean> => {
     if (!isConflict(error)) {
       throw error
     }
-    return adoptServerVersion(item.id)
+    // 重新导入时云端往往是「删除全部」留下的墓碑：409 响应已带当前 rev 和 deleted，
+    // 直接显式复活即可，大批量导入时省掉上千次额外的 GET。
+    if (item.origin === 'import' && error.deleted && error.serverRev !== undefined) {
+      await reupload(item.id, error.serverRev, session, true)
+      return false
+    }
+    return resolveConflict(item.id, item, session)
   }
   return false
 }
@@ -232,18 +306,20 @@ const push = async (): Promise<number> => {
   return conflicts
 }
 
-/** 拉取一页变更并应用；返回是否还有下一页，以及被服务端版本覆盖的本地改动数 */
+/** 拉取一页变更并应用；返回分页信息、被服务端覆盖的本地改动数、以及本地更新的会话数 */
 const pullPage = async (
   since: number
-): Promise<{ nextSince: number; hasMore: boolean; overwritten: number }> => {
+): Promise<{ nextSince: number; hasMore: boolean; overwritten: number; localWins: number }> => {
   const page = await syncChanges(since, PAGE_SIZE)
   const sessions: Session[] = []
   const files: db.StoredFile[] = []
   const deletedIds: string[] = []
   const sessionRevs = new Map<string, number>()
   const removedIds: string[] = []
-  const pending = new Set((await listPending()).map((item) => item.id))
+  const pending = new Map((await listPending()).map((item) => [item.id, item]))
+  const localSummaries = new Map(useChatStore.getState().sessions.map((item) => [item.id, item]))
   let overwritten = 0
+  let localWins = 0
 
   for (const change of page.sessions) {
     const localRev = await getSessionRev(change.id)
@@ -253,6 +329,16 @@ const pullPage = async (
     }
     const remote = await syncGetSession(change.id)
     if (remote.deleted) {
+      // 导入期间 push 若有单条失败，云端仍可能暂时是墓碑。此时不能用旧墓碑删掉
+      // 刚导入的会话：保留 origin='import' 的队列项，下一轮 push 会 revive 覆盖它。
+      const queued = pending.get(change.id)
+      if (
+        queued?.origin === 'import' &&
+        queued.kind === 'upsert' &&
+        localSummaries.has(change.id)
+      ) {
+        continue
+      }
       deletedIds.push(change.id)
       removedIds.push(change.id)
     } else if (!isSessionPayload(remote.session)) {
@@ -261,12 +347,26 @@ const pullPage = async (
       setSyncStatus({ errorKey: 'syncErrorInvalidData' })
       continue
     } else {
+      // 本地版本比拉下来的更新：不要落库远端旧版本，保留并补上待上传队列，
+      // 下一轮 push 会以 serverRev 为 baseRev 把本地版本写回服务端。
+      // 列表元数据只有 updatedAt（正常数据里它就是最后一条消息的时间），足够做这个判断。
+      const localSummary = localSummaries.get(change.id)
+      if (localSummary && localSummary.updatedAt > freshness(remote.session)) {
+        if (!pending.has(change.id)) {
+          const item: PendingItem = { id: change.id, kind: 'upsert', updatedAt: Date.now() }
+          await markPending(item)
+          pending.set(change.id, item)
+        }
+        localWins += 1
+        continue
+      }
       sessions.push(remote.session)
       sessionRevs.set(change.id, remote.rev)
     }
-    // 远端变更覆盖了本地未上传的改动，丢弃该队列项（服务端优先）
+    // 远端变更覆盖了本地未上传的改动，丢弃该队列项
     if (pending.has(change.id)) {
       await clearPending(change.id)
+      pending.delete(change.id)
       overwritten += 1
     }
   }
@@ -296,18 +396,20 @@ const pullPage = async (
     )
   }
   await commitSyncProgress(page.nextSince, sessionRevs, removedIds)
-  return { nextSince: page.nextSince, hasMore: page.hasMore, overwritten }
+  return { nextSince: page.nextSince, hasMore: page.hasMore, overwritten, localWins }
 }
 
-/** 拉取阶段：分页直到追上服务端，返回被冲突覆盖的本地改动总数 */
-const pull = async (): Promise<number> => {
+/** 拉取阶段：分页直到追上服务端，返回被覆盖的本地改动数与本地更新的会话数 */
+const pull = async (): Promise<{ overwritten: number; localWins: number }> => {
   let since = await getLastSyncedRev()
   let overwritten = 0
+  let localWins = 0
   for (let page = 0; page < 100; page += 1) {
     const result = await pullPage(since)
     overwritten += result.overwritten
+    localWins += result.localWins
     if (!result.hasMore) {
-      return overwritten
+      return { overwritten, localWins }
     }
     if (result.nextSince <= since) {
       throw new SyncError('protocol', 0, 'sync cursor did not advance')
@@ -323,19 +425,25 @@ const pull = async (): Promise<number> => {
  * 导入 ZIP 是「用备份覆盖本地」，本地列表才是权威：旧队列里的删除意图已经过期，
  * 且全量替换期间列表可能尚未稳定。此时若按 sessionRev 差集给云端写墓碑，
  * 会把刚导入的会话在云端删掉，随后 pull 又把墓碑应用回本地，造成两端都丢数据。
- * 因此导入场景传入 { resetPending: true, tombstones: false }。
+ * 因此导入场景传入 { resetPending: true, tombstones: false, origin: 'import' }；
+ * origin 让这些队列项在遇到云端墓碑时可以显式复活会话。
  */
 const reconcile = async (
-  options: { resetPending?: boolean; tombstones?: boolean } = {}
+  options: { resetPending?: boolean; tombstones?: boolean; origin?: 'import' } = {}
 ): Promise<void> => {
-  const { resetPending = false, tombstones = true } = options
+  const { resetPending = false, tombstones = true, origin } = options
   if (resetPending) {
     await clearAllPending()
   }
   const state = useChatStore.getState()
   const now = Date.now()
   for (const summary of state.sessions) {
-    await markPending({ id: summary.id, kind: 'upsert', updatedAt: now })
+    await markPending({
+      id: summary.id,
+      kind: 'upsert',
+      updatedAt: now,
+      ...(origin ? { origin } : {}),
+    })
   }
   if (!tombstones) {
     return
@@ -369,8 +477,12 @@ const syncOnce = async (): Promise<void> => {
       await reconcile()
     }
     const pushConflicts = await push()
-    const pullConflicts = await pull()
-    const conflicts = pushConflicts + pullConflicts
+    const pullResult = await pull()
+    let conflicts = pushConflicts + pullResult.overwritten
+    // pull 判定本地版本更新并重新排了队，立刻再推一轮，不等下一次定时或推送通知
+    if (pullResult.localWins > 0) {
+      conflicts += await push()
+    }
     const pending = await listPending()
     if (conflicts > 0) {
       showToast({ key: 'syncConflictToast', params: { count: conflicts } })
@@ -452,7 +564,7 @@ const handleChange = (event: ChatChangeEvent) => {
   if (event.type === 'replace') {
     const fromImport = event.reason === 'import'
     void enqueue(async () => {
-      await reconcile(fromImport ? { resetPending: true, tombstones: false } : {})
+      await reconcile(fromImport ? { resetPending: true, tombstones: false, origin: 'import' } : {})
       if (syncReady(useSyncConfig.getState())) {
         await syncOnce()
       }

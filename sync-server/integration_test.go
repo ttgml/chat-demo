@@ -209,6 +209,85 @@ func TestSyncRoundTrip(t *testing.T) {
 	}
 }
 
+// 回归测试：重新导入备份属于显式全量替换，需要能覆盖云端墓碑恢复会话。
+// 但普通编辑（不带 revive）即使 baseRev 匹配也不能把已删除会话「复活」，
+// 且 revive 不能绕过 baseRev 乐观锁。
+func TestReviveDeletedSession(t *testing.T) {
+	ts, _ := testServer(t)
+	alice := registerUser(t, ts, "reviveuser")
+	session := map[string]any{
+		"id": "revive-1", "title": "导入的会话", "createdAt": 900,
+		"updatedAt": 1000, "messages": []any{},
+	}
+	var put struct {
+		Rev int64 `json:"rev"`
+	}
+	status := doJSON(t, ts, "PUT", "/api/session/revive-1", alice, map[string]any{
+		"baseRev": 0, "updatedAt": 1000, "session": session,
+	}, &put)
+	if status != 200 || put.Rev <= 0 {
+		t.Fatalf("put session status=%d rev=%d", status, put.Rev)
+	}
+
+	var tombstone struct {
+		Rev int64 `json:"rev"`
+	}
+	status = doJSON(t, ts, "DELETE", "/api/session/revive-1?baseRev="+strconv.FormatInt(put.Rev, 10),
+		alice, nil, &tombstone)
+	if status != 200 || tombstone.Rev <= put.Rev {
+		t.Fatalf("delete status=%d rev=%d, after put rev=%d", status, tombstone.Rev, put.Rev)
+	}
+
+	var conflict struct {
+		Error     string `json:"error"`
+		Deleted   bool   `json:"deleted"`
+		ServerRev int64  `json:"serverRev"`
+	}
+	status = doJSON(t, ts, "PUT", "/api/session/revive-1", alice, map[string]any{
+		"baseRev": tombstone.Rev, "updatedAt": 1000, "session": session,
+	}, &conflict)
+	if status != 409 || conflict.Error != "conflict" || !conflict.Deleted || conflict.ServerRev != tombstone.Rev {
+		t.Fatalf("plain put over tombstone status=%d body=%+v", status, conflict)
+	}
+
+	// revive 但 baseRev 过期：仍必须 409，防止跳过乐观锁覆盖其他设备的写入。
+	status = doJSON(t, ts, "PUT", "/api/session/revive-1", alice, map[string]any{
+		"baseRev": 0, "updatedAt": 1000, "session": session, "revive": true,
+	}, &conflict)
+	if status != 409 || conflict.ServerRev != tombstone.Rev {
+		t.Fatalf("revive with stale baseRev status=%d body=%+v", status, conflict)
+	}
+
+	status = doJSON(t, ts, "PUT", "/api/session/revive-1", alice, map[string]any{
+		"baseRev": tombstone.Rev, "updatedAt": 1000, "session": session, "revive": true,
+	}, &put)
+	if status != 200 || put.Rev <= tombstone.Rev {
+		t.Fatalf("revive status=%d rev=%d, tombstone rev=%d", status, put.Rev, tombstone.Rev)
+	}
+
+	var got struct {
+		Deleted bool           `json:"deleted"`
+		Session map[string]any `json:"session"`
+	}
+	doJSON(t, ts, "GET", "/api/session/revive-1", alice, nil, &got)
+	if got.Deleted || got.Session["title"] != "导入的会话" {
+		t.Fatalf("revived session = %+v", got)
+	}
+
+	var state struct {
+		Sessions int64 `json:"sessions"`
+	}
+	doJSON(t, ts, "GET", "/api/state", alice, nil, &state)
+	if state.Sessions != 1 {
+		t.Fatalf("state after revive = %+v, want sessions=1", state)
+	}
+	var changes changesResponse
+	doJSON(t, ts, "GET", "/api/changes?since=0", alice, nil, &changes)
+	if len(changes.Sessions) != 1 || changes.Sessions[0].Deleted {
+		t.Fatalf("changes after revive = %+v", changes.Sessions)
+	}
+}
+
 func TestFileRoundTrip(t *testing.T) {
 	ts, _ := testServer(t)
 	alice := registerUser(t, ts, "fileuser")

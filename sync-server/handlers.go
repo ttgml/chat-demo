@@ -239,6 +239,9 @@ type putSessionRequest struct {
 	BaseRev   int64           `json:"baseRev"`
 	UpdatedAt int64           `json:"updatedAt"`
 	Session   json.RawMessage `json:"session"`
+	// Revive 表示客户端已知该 id 是墓碑，并显式要求恢复（导入备份时的全量替换）。
+	// 默认不带此标志时仍拒绝覆盖墓碑，避免离线设备的旧编辑把已删除会话「复活」。
+	Revive bool `json:"revive"`
 }
 
 // handlePutSession 用 baseRev 做乐观锁：与服务端版本不一致时返回 409 和当前版本。
@@ -277,7 +280,7 @@ func (s *Server) handlePutSession(w http.ResponseWriter, r *http.Request) {
 	if isNoRows(err) {
 		storedRev = 0
 	}
-	if storedRev != body.BaseRev || deleted {
+	if storedRev != body.BaseRev || (deleted && !body.Revive) {
 		writeJSON(w, http.StatusConflict, map[string]any{
 			"error": "conflict", "message": errConflict.Message, "serverRev": storedRev, "deleted": deleted,
 		})

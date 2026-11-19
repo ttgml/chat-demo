@@ -11,6 +11,8 @@ export type PendingItem = {
   kind: PendingKind
   /** 本地变更时间，仅用于展示与排序 */
   updatedAt: number
+  /** 'import' 来自导入备份的全量替换：允许覆盖云端墓碑恢复会话 */
+  origin?: 'import'
 }
 
 interface SyncMetaDB extends DBSchema {

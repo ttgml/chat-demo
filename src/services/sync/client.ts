@@ -63,7 +63,8 @@ const request = async (
         body.error ?? 'http',
         response.status,
         body.message ?? response.statusText,
-        body.serverRev
+        body.serverRev,
+        body.deleted
       )
     }
     return response
@@ -159,7 +160,7 @@ export const syncGetSession = (id: string, signal?: AbortSignal) =>
 
 export const syncPutSession = (
   id: string,
-  body: { baseRev: number; updatedAt: number; session: unknown },
+  body: { baseRev: number; updatedAt: number; session: unknown; revive?: boolean },
   signal?: AbortSignal
 ) =>
   jsonRequest<{ rev: number }>(

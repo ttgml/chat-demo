@@ -54,7 +54,9 @@ export class SyncError extends Error {
     readonly code: string,
     readonly status: number,
     message: string,
-    readonly serverRev?: number
+    readonly serverRev?: number,
+    /** 409 时服务端该会话是否为删除墓碑 */
+    readonly deleted?: boolean
   ) {
     super(message)
     this.name = 'SyncError'
