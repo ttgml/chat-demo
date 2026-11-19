@@ -20,6 +20,7 @@ export const SessionItem = memo(function SessionItem({
 }) {
   const t = useTranslate()
   const [editing, setEditing] = useState(false)
+  const [menuOpen, setMenuOpen] = useState(false)
   const displayTitle = session.title || t('untitledChat')
 
   if (editing) {
@@ -56,8 +57,12 @@ export const SessionItem = memo(function SessionItem({
       }}
     >
       <div className={styles.title}>{displayTitle}</div>
-      <div className={styles.action} onClick={(event) => event.stopPropagation()}>
+      <div
+        className={clsx(styles.action, menuOpen && styles.actionOpen)}
+        onClick={(event) => event.stopPropagation()}
+      >
         <Menu
+          onOpenChange={setMenuOpen}
           options={[
             {
               key: 'rename',

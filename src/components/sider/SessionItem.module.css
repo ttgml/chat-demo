@@ -45,6 +45,11 @@
   margin-left: 4px;
 }
 
+/* 菜单展开期间保持触发按钮可见：按钮随悬停消失后触发元素没有尺寸，浮层会丢掉定位基准 */
+.actionOpen {
+  display: flex;
+}
+
 .renameInput {
   box-sizing: border-box;
   width: 100%;
