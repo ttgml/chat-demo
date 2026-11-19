@@ -36,6 +36,27 @@ import {
 const MODEL: ChatModel = 'deepseek-flash'
 /** 所有生成请求统一携带的助手身份说明 */
 const SYSTEM_PROMPT = '该助手为DeepSeek，由深度求索公司创造。'
+/** 云同步订阅：本地会话落盘、删除、全量替换后通知，供同步模块排队上传。 */
+export type ChatChangeEvent =
+  | { type: 'upsert'; id: string }
+  | { type: 'delete'; id: string }
+  | { type: 'replace' }
+
+const chatChangeListeners = new Set<(event: ChatChangeEvent) => void>()
+
+export const onChatChange = (listener: (event: ChatChangeEvent) => void) => {
+  chatChangeListeners.add(listener)
+  return () => {
+    chatChangeListeners.delete(listener)
+  }
+}
+
+const emitChatChange = (event: ChatChangeEvent) => {
+  for (const listener of chatChangeListeners) {
+    listener(event)
+  }
+}
+
 /** 保留最近打开的详情；当前会话、生成中及尚未成功保存的会话不淘汰。 */
 const SESSION_CACHE_LIMIT = 5
 /** 安全审核固定开启，所有请求都走扩展模式 */
@@ -205,6 +226,10 @@ const persist = (sessionId: string) => {
             ),
           }))
           trimSessionCache()
+        }
+        // 流式生成中的中间态不上传；回复结束后还会再落盘一次，届时再排队。
+        if (!Object.hasOwn(get().streaming, sessionId)) {
+          emitChatChange({ type: 'upsert', id: sessionId })
         }
       })
       .catch((error: unknown) => {
@@ -426,6 +451,9 @@ export const replaceHistory = async (write: () => Promise<void>): Promise<number
       sessionSaveErrors: {},
       activeId: null,
     })
+    // 导入 ZIP / 删除全部属于全量替换：由同步模块做一次全量对账，
+    // 把存活会话排队上传，并给已同步过但本地已消失的会话写墓碑。
+    emitChatChange({ type: 'replace' })
     return summaries.length
   } finally {
     set({ importingHistory: false })
@@ -437,6 +465,48 @@ export const replaceHistory = async (write: () => Promise<void>): Promise<number
     } else if (!ready) {
       void initChat()
     }
+  }
+}
+
+/**
+ * 应用云端拉取的增量结果到内存：只更新列表与被覆盖会话的缓存，
+ * 不中止生成、不清空草稿、不重置 activeId（除非当前会话被远端删除）。
+ * 生成中的会话保留内存内容，等本次回复落盘后再由下一轮同步对齐。
+ */
+export const applyRemoteSummaries = (
+  summaries: SessionSummary[],
+  changedIds: readonly string[],
+  deletedIds: readonly string[]
+) => {
+  const state = get()
+  const streamingIds = new Set(Object.keys(state.streaming))
+  const replaced = new Set(changedIds.filter((id) => !streamingIds.has(id)))
+  const removed = new Set(deletedIds)
+  set({
+    ready: true,
+    sessions: sortSessions(summaries),
+    sessionCache: Object.fromEntries(
+      Object.entries(state.sessionCache).filter(([id]) => !replaced.has(id) && !removed.has(id))
+    ),
+    sessionLoadErrors: Object.fromEntries(
+      Object.entries(state.sessionLoadErrors).filter(
+        ([id]) => !replaced.has(id) && !removed.has(id)
+      )
+    ),
+    sessionSaveErrors: Object.fromEntries(
+      Object.entries(state.sessionSaveErrors).filter(([id]) => !removed.has(id))
+    ),
+    activeId: state.activeId !== null && removed.has(state.activeId) ? null : state.activeId,
+  })
+  for (const id of removed) {
+    clearDraft(id)
+  }
+  // 当前正在查看的会话被远端覆盖后，缓存已失效，需要立即重新载入，
+  // 否则界面会停在「正在加载对话」直到用户手动切换会话。
+  // 被远端删除的会话已在上面把 activeId 置空，无需重载。
+  const activeId = get().activeId
+  if (activeId !== null && replaced.has(activeId)) {
+    void ensureSessionLoaded(activeId)
   }
 }
 
@@ -473,7 +543,10 @@ export const renameSession = (id: string, title: string) => {
         session.id === id ? { ...session, title } : session
       ),
     }))
-    void db.renameSession(id, title).catch(db.reportStorageError('rename session'))
+    void db
+      .renameSession(id, title)
+      .then(() => emitChatChange({ type: 'upsert', id }))
+      .catch(db.reportStorageError('rename session'))
   }
 }
 
@@ -522,6 +595,7 @@ const removeSessionData = async (id: string): Promise<boolean> => {
       ),
       activeId: state.activeId === id ? null : state.activeId,
     }))
+    emitChatChange({ type: 'delete', id })
     return true
   } catch (error) {
     db.reportStorageError('delete session')(error)

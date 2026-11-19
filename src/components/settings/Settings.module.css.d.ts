@@ -33,6 +33,12 @@ declare const styles: {
   readonly "importConfirmText": string;
   readonly "deleteConfirm": string;
   readonly "deleteActions": string;
+  readonly "syncForm": string;
+  readonly "syncField": string;
+  readonly "syncInput": string;
+  readonly "syncToggle": string;
+  readonly "syncActions": string;
+  readonly "syncWarning": string;
 };
 export = styles;
 

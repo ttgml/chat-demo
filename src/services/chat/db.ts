@@ -249,3 +249,45 @@ export const reportStorageError = (action: string) => (error: unknown) => {
   // eslint-disable-next-line no-console
   console.error(`[storage] ${action} failed`, error)
 }
+
+/** 云同步拉取到的变更：会话、附件原件、删除墓碑 */
+export type RemoteChanges = {
+  sessions: Session[]
+  files: StoredFile[]
+  deletedIds: string[]
+}
+
+/**
+ * 增量应用远端变更：在单个事务中 upsert 会话与附件、应用删除墓碑，返回提交后的完整列表。
+ * 与 commitStaging 不同，这里不清空任何现有数据，也不中断正在生成的回复。
+ * 删除时不清理 files 原件：同一附件可能被本机其他会话引用，也可能被其他设备上传，
+ * 本地引用计数不足以判断全局是否还需要，统一交由后续清理策略处理。
+ */
+export const applyRemoteChanges = async (changes: RemoteChanges): Promise<SessionSummary[]> => {
+  const tx = (await getDB()).transaction(['sessions', 'sessionSummaries', 'files'], 'readwrite')
+  const write = async () => {
+    try {
+      const sessions = tx.objectStore('sessions')
+      const summaries = tx.objectStore('sessionSummaries')
+      const files = tx.objectStore('files')
+      for (const session of changes.sessions) {
+        await sessions.put(session)
+        await summaries.put(storedSummary(session))
+      }
+      for (const id of changes.deletedIds) {
+        await sessions.delete(id)
+        await summaries.delete(id)
+      }
+      for (const file of changes.files) {
+        await files.put(file)
+      }
+    } catch (error) {
+      abortTransaction(tx)
+      throw error
+    }
+  }
+  await Promise.all([write(), tx.done])
+  // 事务提交后统一读取列表，避免调用方在中途拿到不一致的快照。
+  const all = await (await getDB()).getAll('sessionSummaries')
+  return all.map(toSessionSummary)
+}

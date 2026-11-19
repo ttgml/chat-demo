@@ -15,6 +15,7 @@ import { SessionView } from '../components/session/SessionView.js'
 import { MobileHeader } from '../components/session/MobileHeader.js'
 import { Welcome } from '../components/session/Welcome.js'
 import { ensureApiKey } from '../components/settings/settingsDialogState.js'
+import { startSync } from '../services/sync/engine.js'
 import { SettingsDialog } from '../components/settings/SettingsDialog.js'
 import { Toast } from '../components/base/Toast.js'
 import { showToast } from '../components/base/toastState.js'
@@ -72,6 +73,10 @@ export const App = () => {
     // 首次打开先在设置里输入 API Key
     ensureApiKey()
   }, [])
+
+  // 同步模块只读本地 IndexedDB，不阻塞界面；失败时自行排队重试。
+  // startSync 内部会等待主库 ready，因此这里无需串联 initChat 的结果。
+  useEffect(startSync, [])
 
   return (
     <>

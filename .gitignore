@@ -9,3 +9,6 @@ build/
 .env.*
 !.env.example
 tmp/
+
+# WorkBuddy 本地工作记录（含内部决策），不纳入版本控制
+.workbuddy/
