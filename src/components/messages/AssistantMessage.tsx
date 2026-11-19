@@ -15,6 +15,7 @@ import { SiteThumbnails } from '../search/SiteLogo.js'
 import { toggleSearchPanel, useSearchPanel } from '../search/searchPanelState.js'
 import { ReadAloudButton } from './ReadAloudButton.js'
 import { CopyButton } from './CopyButton.js'
+import { MessageUsage } from './MessageUsage.js'
 import { ReplyArea } from './ReplyArea.js'
 import { useReplyView } from './useReplyView.js'
 import {
@@ -146,6 +147,7 @@ export const AssistantMessage = memo(function AssistantMessage({
             {responseText && !refused ? (
               <ReadAloudButton messageId={message.id} text={responseText} />
             ) : null}
+            {message.usage ? <MessageUsage message={message} /> : null}
             <IconButton
               icon={<IconRefreshOutline16 />}
               tooltip={t('regenerate')}

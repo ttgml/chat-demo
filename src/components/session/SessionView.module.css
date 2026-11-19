@@ -15,7 +15,16 @@
   background: var(--dsw-alias-bg-base);
 }
 
+.titleRow {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  max-width: 520px;
+}
+
 .title {
+  min-width: 0;
   max-width: 480px;
   padding: 8px 12px;
   overflow: hidden;

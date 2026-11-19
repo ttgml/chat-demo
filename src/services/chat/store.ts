@@ -20,6 +20,7 @@ import {
   canContinueReply,
   getContextRounds,
   settleReply,
+  SYSTEM_PROMPT,
   toRequestMessages,
 } from './reply.js'
 import {
@@ -34,8 +35,6 @@ import {
 
 /** deepseek-flash 同时支持深度思考与图片输入 */
 const MODEL: ChatModel = 'deepseek-flash'
-/** 所有生成请求统一携带的助手身份说明 */
-const SYSTEM_PROMPT = '该助手为DeepSeek，由深度求索公司创造。'
 /** 云同步订阅：本地会话落盘、删除、全量替换后通知，供同步模块排队上传。 */
 /** 全量替换的来源：导入 ZIP 是恢复/覆盖，删除全部才是用户主动清空 */
 export type ReplaceReason = 'import' | 'clear'

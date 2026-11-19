@@ -15,6 +15,9 @@ import type {
   UserMessage,
 } from './types.js'
 
+/** 所有生成请求统一携带的助手身份说明 */
+export const SYSTEM_PROMPT = '该助手为DeepSeek，由深度求索公司创造。'
+
 /**
  * 文件按 Files API 的 file_id（附件的 serverId）引用：图片用 image 块，其余用 document 块。
  * 发送前 streamReply 会先补齐 serverId；仍为 null 的是本地没有原件的附件，不进入请求。
@@ -194,7 +197,7 @@ export const canContinueReply = (reply: AssistantMessage): boolean => {
  * 已结束或停止且有回答文本的回复才放进上下文；被安全拒绝的轮次不回传。
  * 服务端模板提示不进入上下文。
  */
-const isUsableReply = (message: Message): message is AssistantMessage =>
+export const isUsableReply = (message: Message): message is AssistantMessage =>
   message.role === 'assistant' &&
   (message.status === 'done' || message.status === 'stopped') &&
   message.stopReason !== 'refusal' &&
@@ -297,16 +300,10 @@ export const getContextRounds = (history: Message[]): [UserMessage, AssistantMes
 }
 
 /**
- * 把会话转成请求的 messages：只保留「提问 + 有回答的回复」成对的轮次，最后接上本轮提问。
- * 失败或没有回答的轮次不进上下文。续写时末尾再带上本轮 assistant。
+ * 历史中进入请求的部分：只保留「提问 + 有回答的回复」成对的轮次，并按请求格式转换。
+ * 失败或没有回答的轮次不进上下文；末尾未成对的提问与生成中的回复由调用方补上。
  */
-export const toRequestMessages = (
-  history: Message[],
-  question: UserMessage,
-  prefix?: AssistantMessage,
-  thinking = prefix?.thinking ?? false,
-  latestReminder?: string
-): MessageParam[] => {
+export const toContextMessages = (history: Message[]): MessageParam[] => {
   const messages: MessageParam[] = []
   let previousReminder: string | undefined
   const appendReminder = (reminder: string | undefined) => {
@@ -324,7 +321,28 @@ export const toRequestMessages = (
     appendReminder(reply.latestReminder)
     messages.push(toUserParam(user), toAssistantParam(reply))
   }
-  appendReminder(latestReminder)
+  return messages
+}
+
+/**
+ * 把会话转成请求的 messages：历史轮次 + 本轮提问；续写时末尾再带上本轮 assistant。
+ */
+export const toRequestMessages = (
+  history: Message[],
+  question: UserMessage,
+  prefix?: AssistantMessage,
+  thinking = prefix?.thinking ?? false,
+  latestReminder?: string
+): MessageParam[] => {
+  const messages = toContextMessages(history)
+  const previousReminder = messages.findLast(
+    (message): message is Extract<MessageParam, { role: 'latest_reminder' }> =>
+      message.role === 'latest_reminder'
+  )?.content
+  // 仅在快照内容变化时插入；最后一条快照可能出现在任意历史轮次之前。
+  if (latestReminder && latestReminder !== previousReminder) {
+    messages.push({ role: 'latest_reminder', content: latestReminder })
+  }
   messages.push(toUserParam(question))
   if (prefix?.prefix) {
     const assistant = toAssistantParam(prefix, true, thinking)

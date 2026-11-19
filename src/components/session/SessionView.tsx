@@ -4,6 +4,7 @@ import { useTranslate } from '../../i18n/index.js'
 import type { Session } from '../../services/chat/types.js'
 import { ChatInput } from '../chatInput/ChatInput.js'
 import { MessageList } from '../messages/MessageList.js'
+import { ContextUsage } from './ContextUsage.js'
 import { MobileHeader } from './MobileHeader.js'
 import styles from './SessionView.module.css'
 
@@ -23,11 +24,12 @@ export const SessionView = ({
   return (
     <div className={styles.view}>
       {isMobile ? (
-        <MobileHeader title={title} />
+        <MobileHeader title={title} session={session} />
       ) : (
         <div className={styles.header}>
-          <div className={clsx(styles.title, siderCollapsed && styles.withCollapsedSider)}>
-            {title}
+          <div className={clsx(styles.titleRow, siderCollapsed && styles.withCollapsedSider)}>
+            <div className={styles.title}>{title}</div>
+            <ContextUsage session={session} />
           </div>
         </div>
       )}
