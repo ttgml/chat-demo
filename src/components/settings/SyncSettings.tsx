@@ -13,6 +13,7 @@ import { resetSyncMeta } from '../../services/sync/meta.js'
 import { syncNow } from '../../services/sync/engine.js'
 import { useSyncStatus } from '../../services/sync/status.js'
 import { Button } from '../base/Button.js'
+import { Modal } from '../base/Modal.js'
 import { showToast } from '../base/toastState.js'
 import styles from './Settings.module.css'
 
@@ -29,6 +30,8 @@ export const SyncSettings = () => {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [serverSessions, setServerSessions] = useState<number | null>(null)
+  // 退出登录需要二次确认，确认弹窗叠在设置之上
+  const [confirmLogout, setConfirmLogout] = useState(false)
 
   const signedIn = config.token !== null
   // 已登录后账号信息以配置为准，输入框只读；更换账号必须先退出登录。
@@ -107,6 +110,7 @@ export const SyncSettings = () => {
 
   const logout = async () => {
     setBusy(true)
+    setConfirmLogout(false)
     try {
       await syncLogout()
     } catch {
@@ -197,15 +201,17 @@ export const SyncSettings = () => {
             </div>
           ) : null}
         </div>
-        {signedIn ? (
+        {/* 暂停同步入口不展示：登录即视为开启同步。
+            仅对历史版本遗留的「已暂停」账号保留恢复入口，避免卡在暂停状态无法继续。 */}
+        {signedIn && !config.enabled ? (
           <Button
             variant="outlined"
             size="m"
             className={styles.cellButton}
             disabled={busy}
-            onClick={() => setSyncEnabled(!config.enabled)}
+            onClick={() => setSyncEnabled(true)}
           >
-            {config.enabled ? t('syncPause') : t('syncResume')}
+            {t('syncResume')}
           </Button>
         ) : null}
       </div>
@@ -307,11 +313,11 @@ export const SyncSettings = () => {
             )}
             {signedIn ? (
               <Button
-                variant="outlined"
+                variant="dangerOutlined"
                 size="m"
                 className={styles.cellButton}
                 disabled={busy}
-                onClick={() => void logout()}
+                onClick={() => setConfirmLogout(true)}
               >
                 {t('syncLogout')}
               </Button>
@@ -319,6 +325,34 @@ export const SyncSettings = () => {
           </div>
         </div>
       </div>
+      {confirmLogout ? (
+        <Modal
+          title={t('syncLogoutConfirmTitle')}
+          className={styles.deleteConfirm}
+          onClose={() => {
+            if (!busy) {
+              setConfirmLogout(false)
+            }
+          }}
+          footer={
+            <div className={styles.deleteActions} aria-busy={busy}>
+              <Button
+                variant="outlined"
+                autoFocus
+                disabled={busy}
+                onClick={() => setConfirmLogout(false)}
+              >
+                {t('cancel')}
+              </Button>
+              <Button variant="danger" disabled={busy} onClick={() => void logout()}>
+                {t('syncLogout')}
+              </Button>
+            </div>
+          }
+        >
+          {t('syncLogoutConfirmDescription')}
+        </Modal>
+      ) : null}
     </>
   )
 }
