@@ -1,0 +1,176 @@
+# chat-demo 同步服务
+
+为 [chat-demo](../README.md) 提供多设备会话同步的独立服务。**自部署与托管运行的是同一份代码、同一个镜像**，区别只在配置：
+
+| | 自部署 | 托管 |
+|---|---|---|
+| 部署方式 | `docker compose up` 或单二进制 | 同一镜像 + 反向代理 / HTTPS |
+| 数据库 | 本机 Postgres | 托管 Postgres |
+| 前端配置 | 填自己的服务地址 | 填托管服务地址 |
+| 注册开放 | 由部署者控制（见下文） | 可限流并配额 |
+
+## 设计要点
+
+- **无损原生格式**：会话以客户端 IndexedDB 中的 `Session` JSON 存入 `payload JSONB`，服务端**不解析、不改写**内部字段，所有字段与值完整保留。现有的 ZIP 导入导出是给其他 app 兼容用的有损归档，本服务不使用、也不影响它。
+  > 注意 `jsonb` 会**重排对象键的顺序**（例如 `{nested, keepMe}` 取回后变成 `{keepMe, nested}`），因此字节级并非逐字相同，语义上无损。前端按字段名读取，不受影响；但如果将来要用 `JSON.stringify` 结果做哈希或比较，需要先规范化键顺序。
+- **增量游标**：每个用户一个单调递增的 `rev`。任何会话写入、删除（墓碑）、附件上传都会 `+1`。客户端用 `since` 增量拉取。
+- **乐观锁**：上传会话须带 `baseRev`（客户端上次看到的服务端版本），不一致返回 `409`，由客户端决定用哪一版。避免多设备静默互相覆盖。
+- **墓碑删除**：删除会话写 `deleted = true` 并保留记录，保证其他设备能收到删除事件，不会把已删会话"复活"。
+- **附件解耦**：附件按客户端 `file.id` 独立存储，服务端不做引用计数 GC，避免设备 A 删会话时误删设备 B 仍引用的图片。
+- **按用户隔离**：所有 SQL 都带 token 解析出的 `user_id`，从不信任客户端传入的用户标识。
+
+## 快速开始
+
+```sh
+cp .env.example .env
+# 至少修改 SYNC_ALLOWED_ORIGINS 为你的前端地址
+docker compose up -d
+curl http://localhost:8080/healthz   # -> ok
+```
+
+或直接跑二进制（需已有 Postgres）：
+
+```sh
+SYNC_DATABASE_URL='postgres://user:pass@localhost:5432/chatsync?sslmode=disable' \
+SYNC_ALLOWED_ORIGINS='http://localhost:8090' \
+go run .
+```
+
+表结构在启动时自动创建（`CREATE TABLE IF NOT EXISTS`），无需手动迁移工具。
+
+### 与前端本地联调
+
+```sh
+# 终端 1：同步服务 + Postgres
+cd sync-server && cp .env.example .env && docker compose up -d
+
+# 终端 2：前端开发服务器（http://localhost:8090）
+cd .. && pnpm dev
+```
+
+在设置 → 云同步里填 `http://localhost:8080`、用户名、密码，点「注册」即可开启。
+`.env` 里的 `SYNC_ALLOWED_ORIGINS` 必须包含前端来源（默认已含 `http://localhost:8090`），
+否则浏览器预检会被拦。HTTP 仅用于本机联调，公网部署务必上 HTTPS。
+
+验证两台设备：用两个不同的浏览器用户配置（或无痕窗口）打开同一前端地址，
+用同一账号登录，在其中一个新建对话，另一个会在切回前台或下一轮定时同步时看到。
+
+## 配置项
+
+| 变量 | 默认值 | 说明 |
+|---|---|---|
+| `SYNC_DATABASE_URL` | 必填 | Postgres 连接串 |
+| `SYNC_ADDR` | `:8080` | 监听地址 |
+| `SYNC_ALLOWED_ORIGINS` | 空（禁跨域） | 允许的前端来源，逗号分隔 |
+| `SYNC_REQUIRE_HTTPS` | `false` | 附加 HSTS 头 |
+| `SYNC_TOKEN_TTL` | `720h` | 登录 token 有效期 |
+| `SYNC_MAX_SESSION_BYTES` | `8388608` | 单个会话 JSON 上限 |
+| `SYNC_MAX_FILE_BYTES` | `33554432` | 单个附件上限 |
+| `SYNC_LOGIN_LIMIT` | `10` | 每 IP 窗口内登录尝试次数 |
+| `SYNC_LOGIN_WINDOW` | `15m` | 限流窗口 |
+
+## API
+
+除注册、登录和 `/healthz` 外，所有接口都需要 `Authorization: Bearer <token>`。
+用户名 3-32 位字母/数字/`_ . -`，密码 8-128 位；密码用 bcrypt 加盐哈希存储。
+
+### 认证
+
+| 方法 | 路径 | 请求 | 响应 |
+|---|---|---|---|
+| POST | `/api/register` | `{username, password}` | `201 {token}`；重名 `409` |
+| POST | `/api/login` | `{username, password}` | `200 {token}`；凭据错误统一 `401` |
+| POST | `/api/logout` | — | `{ok: true}`，撤销当前 token |
+
+登录失败不区分"用户不存在"与"密码错误"，避免账号枚举。
+
+### 同步
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | `/api/state` | `{rev}` 当前全局游标，用于快速判断是否需要拉取 |
+| GET | `/api/changes?since=<rev>&limit=<n>` | 增量变更列表 |
+| GET | `/api/session/{id}` | 单个会话完整原生 JSON |
+| PUT | `/api/session/{id}` | 上传/更新会话 |
+| DELETE | `/api/session/{id}?baseRev=<rev>` | 删除会话（写墓碑） |
+| PUT | `/api/file/{id}` | 上传附件原件（二进制，Content-Type 即 MIME） |
+| GET | `/api/file/{id}` | 下载附件原件 |
+
+**`GET /api/changes` 响应**
+
+```json
+{
+  "rev": 42,
+  "nextSince": 25,
+  "sessions": [
+    { "id": "s1", "rev": 23, "updatedAt": 1730000000000, "deleted": false },
+    { "id": "s2", "rev": 25, "updatedAt": 0, "deleted": true }
+  ],
+  "files": [{ "id": "f1", "rev": 24, "mimeType": "image/png" }],
+  "hasMore": true
+}
+```
+
+> **重要**：分页时下一次请求必须用 `nextSince`（本页最大 rev），**不要用 `rev`**（全局最大版本号）。
+> 服务端把会话与附件的变更统一按 `rev` 排序后分页，两类分别分页会让中间变更被跳过。
+> 循环拉取直到 `hasMore: false`，然后把 `rev` 记为本地已同步游标。
+
+**`PUT /api/session/{id}` 请求**
+
+```json
+{
+  "baseRev": 23,
+  "updatedAt": 1730000000000,
+  "session": { "id": "s1", "title": "...", "messages": ["..."], "..." : "..." }
+}
+```
+
+`session` 是前端 `Session` 对象的原始 JSON，服务端只校验它是合法 JSON。
+成功返回 `{rev: 26}`；`baseRev` 与服务端不符返回：
+
+```json
+{ "error": "conflict", "message": "...", "serverRev": 25, "deleted": false }
+```
+
+错误码统一为 `{error, message}`：`400` 参数非法、`401` 未登录、`404` 不存在、
+`409` 冲突、`413` 超限、`429` 登录限流。
+
+## 前端接入（已实现）
+
+前端代码在 `src/services/sync/`，设置弹窗新增「云同步」分区。落地时的几个关键约定：
+
+1. 设置里填服务地址 + 用户名密码，登录/注册后只持久化 token 与地址，密码不落盘。
+2. **启动时**：`GET /api/changes` 用 `nextSince` 分页拉全量变更 → 逐个 `GET /api/session/{id}` → 在单个 IndexedDB 事务中增量 upsert 并应用墓碑。**没有复用 `replaceHistory()`**（它是全量清空重写，会抹掉本地未同步数据），而是新增 `db.applyRemoteChanges()` + `store.applyRemoteSummaries()`。
+3. **同步元数据独立库**（`chat-demo-sync`），不动主库的 `DB_VERSION`：存 `lastSyncedRev`、每会话 `baseRev`、待上传队列、已上传附件 rev。
+4. **本地变更后**：`store.ts` 在落盘成功后发出变更通知；流式生成中的中间态不上传，回复 settle 后的那次落盘才排队。先上传会话引用的附件原件，再上传会话。
+5. **全局游标只由 pull 阶段按页推进**，push 成功只更新单会话 `baseRev`。若 push 后把游标跳到上传返回的 rev，会漏掉这期间另一台设备上传的较小 rev 变更。
+6. **冲突 `409`**：v1 会话级 Last-Writer-Wins（服务端 rev 大者胜），拉回服务端版本覆盖本地并 toast 提示。
+7. 同步失败不阻塞聊天：本地照常写 IndexedDB，变更排队 + 指数退避重试；401 自动清除登录态并要求重新登录。
+8. 切换服务器/账号时弹确认，说明本地会话会保留并一并上传到新账号；切换后清空同步进度重新对账。
+
+## 测试
+
+```sh
+go test ./...                              # 单元测试（集成测试自动跳过）
+docker compose up -d db                    # 起一个测试用 Postgres
+SYNC_TEST_DATABASE_URL='postgres://chatsync:chatsync@localhost:5432/chatsync?sslmode=disable' \
+  go test -count=1 -v ./...                # 含集成测试
+```
+
+集成测试用随机用户名后缀隔离数据，**不会清空数据库**，可以安全地对已在使用中的库运行。
+覆盖：注册登录、用户隔离、会话无损往返、乐观锁冲突、删除墓碑、附件往返、分页游标不丢数据、未授权访问。
+
+## 安全与运维注意事项
+
+- **自部署走 HTTP 时，用户名密码和聊天记录是明文传输的**。局域网内也有风险，公网部署务必在前面挂 HTTPS 反代并设置 `SYNC_REQUIRE_HTTPS=true`。
+- `SYNC_ALLOWED_ORIGINS` 必须精确列出前端来源。跨域带凭证不允许通配 `*`，配置错误会直接导致浏览器预检失败。
+- 登录限流目前是**进程内**计数；多实例托管时需要在网关层再做一层全局限流。
+- 当前版本**没有注册开关、配额、审计日志和附件 GC**。托管给不特定用户前，建议补上注册开关（环境变量控制）、单用户容量上限、以及墓碑/附件的定期清理策略。
+- 附件以 `BYTEA` 存在 Postgres 中，量大时数据库会膨胀。数据量增长后可迁到对象存储，接口保持不变。
+- 数据库里是聊天明文。托管方需要明确的隐私说明、备份加密和保留期限。
+
+## 已知边界
+
+- 冲突粒度是**会话级**，同一会话两端同时编辑会互相覆盖；消息级合并留待后续版本。
+- 附件上传目前按 `file.id` 幂等覆盖，无版本校验；配合会话里记录的 `baseRev` 使用。
+- 墓碑不会自动清理，长期运行后首次 `since=0` 的全量同步会变慢，需要清理策略。

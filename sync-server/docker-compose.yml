@@ -1,0 +1,33 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: chatsync
+      POSTGRES_PASSWORD: chatsync
+      POSTGRES_DB: chatsync
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U chatsync -d chatsync"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  server:
+    build: .
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      SYNC_ADDR: ":8080"
+      SYNC_DATABASE_URL: "postgres://chatsync:chatsync@db:5432/chatsync?sslmode=disable"
+      # 前端 pnpm dev 默认跑在 8090；部署到其他域名时改成实际来源
+      SYNC_ALLOWED_ORIGINS: "http://localhost:8090"
+      SYNC_REQUIRE_HTTPS: "false"
+    ports:
+      - "8080:8080"
+
+volumes:
+  pgdata:

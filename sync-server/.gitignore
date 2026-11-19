@@ -1,0 +1,4 @@
+sync-server
+.env
+*.test
+*.out
