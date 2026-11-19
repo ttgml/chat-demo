@@ -29,7 +29,8 @@ func main() {
 	defer db.Close()
 
 	auth := newAuthService(db, cfg.TokenTTL, cfg.LoginLimit, cfg.LoginWindow)
-	srv := &Server{db: db, auth: auth, config: cfg}
+	hub := newWatchHub()
+	srv := &Server{db: db, auth: auth, config: cfg, hub: hub}
 	handler := routes(srv, cfg)
 
 	httpServer := &http.Server{
@@ -54,6 +55,8 @@ func main() {
 	case <-sig:
 	case <-ctx.Done():
 	}
+	// WebSocket 连接已被 Hijack，Shutdown 不会关闭它们，需先主动断开。
+	hub.closeAll()
 	shutdownCtx, stop := context.WithTimeout(context.Background(), 10*time.Second)
 	defer stop()
 	if err := httpServer.Shutdown(shutdownCtx); err != nil {
@@ -62,11 +65,19 @@ func main() {
 }
 
 func routes(srv *Server, cfg Config) http.Handler {
+	// 测试等场景可能直接构造 Server；保证 watch 端点始终有可用的 hub。
+	if srv.hub == nil {
+		srv.hub = newWatchHub()
+	}
 	mux := http.NewServeMux()
 
 	// 公开接口：注册、登录。
 	mux.HandleFunc("POST /api/register", srv.handleRegister)
 	mux.HandleFunc("POST /api/login", srv.handleLogin)
+
+	// WebSocket 在握手后的首帧携带 token，不能套用 requireAuth（浏览器
+	// WebSocket API 无法设置 Authorization 头），鉴权在 handleWatch 内完成。
+	mux.HandleFunc("GET /api/watch", srv.handleWatch)
 
 	// 以下接口都需要认证。
 	authOnly := requireAuth(srv.auth)

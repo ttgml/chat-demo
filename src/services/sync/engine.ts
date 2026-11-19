@@ -31,11 +31,14 @@ import {
 import { setSyncStatus, syncErrorKey } from './status.js'
 import { SyncError } from './types.js'
 import { isSessionPayload, sessionFileIds } from './validate.js'
+import { createWatch, type WatchController } from './watch.js'
 
 /** 本地变更后的合并窗口：连续编辑只触发一次同步 */
 const DEBOUNCE_MS = 1200
-/** 后台定时对账间隔 */
+/** 后台定时对账间隔：WebSocket 不可用时的兜底 */
 const POLL_INTERVAL_MS = 60_000
+/** 推送通知的合并窗口：一批连续写入只跑一次完整同步 */
+const WATCH_DEBOUNCE_MS = 200
 /** 单次拉取的分页大小 */
 const PAGE_SIZE = 200
 /** 失败后的重试退避上限 */
@@ -48,6 +51,8 @@ let retryTimer = 0
 let retryDelay = 2_000
 let started = false
 let stopped = false
+let watch: WatchController | null = null
+let watchTimer = 0
 
 const enqueue = (run: () => Promise<void>): Promise<void> => {
   const task = syncQueue.then(run)
@@ -395,6 +400,21 @@ const scheduleSync = () => {
 }
 
 /**
+ * 合并 WebSocket 通知：一次回复可能产生多条变更，只跑一轮同步。
+ * ready 也走这里，用来补齐连接建立/断线期间漏掉的远端写入。
+ */
+const scheduleWatchSync = () => {
+  if (stopped || !syncReady(useSyncConfig.getState())) {
+    return
+  }
+  window.clearTimeout(watchTimer)
+  watchTimer = window.setTimeout(() => {
+    watchTimer = 0
+    void enqueue(syncOnce)
+  }, WATCH_DEBOUNCE_MS)
+}
+
+/**
  * 本地变更始终记录，即使当前未登录或已关闭同步：
  * 重新开启后这些改动仍要上传，否则关闭期间的编辑会永久丢失。
  * 只有真正发起网络请求时才检查 syncReady。
@@ -443,7 +463,7 @@ export const refreshSyncState = (): Promise<void> =>
     await syncOnce()
   })
 
-/** 应用启动时绑定：变更监听、定时对账、切回前台时补一次 */
+/** 应用启动时绑定：变更监听、实时推送、定时对账、切回前台时补一次 */
 export const startSync = (): (() => void) => {
   if (started) {
     return () => {}
@@ -451,6 +471,14 @@ export const startSync = (): (() => void) => {
   started = true
   stopped = false
   const unsubscribe = onChatChange(handleChange)
+  watch = createWatch({
+    onNotify: scheduleWatchSync,
+    onAuthFailure: () => {
+      clearSyncCredentials()
+      setSyncStatus({ phase: 'authRequired', errorKey: 'syncErrorAuth' })
+    },
+  })
+  watch.update(useSyncConfig.getState())
   const unsubscribeConfig = useSyncConfig.subscribe((state, previous) => {
     if (
       state.enabled !== previous.enabled ||
@@ -458,12 +486,15 @@ export const startSync = (): (() => void) => {
       state.token !== previous.token ||
       state.username !== previous.username
     ) {
+      watch?.update(state)
       void refreshSyncState()
     }
   })
   pollTimer = window.setInterval(() => void enqueue(syncOnce), POLL_INTERVAL_MS)
   const onVisible = () => {
     if (document.visibilityState === 'visible') {
+      // 后台期间推送连接可能被系统挂起，立刻恢复并补拉一次。
+      watch?.retryNow()
       void enqueue(syncOnce)
     }
   }
@@ -477,12 +508,16 @@ export const startSync = (): (() => void) => {
   return () => {
     stopped = true
     started = false
+    watch?.close()
+    watch = null
     unsubscribe()
     unsubscribeConfig()
     window.clearInterval(pollTimer)
     window.clearTimeout(debounceTimer)
     window.clearTimeout(retryTimer)
+    window.clearTimeout(watchTimer)
     debounceTimer = 0
     retryTimer = 0
+    watchTimer = 0
   }
 }

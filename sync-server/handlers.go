@@ -17,6 +17,22 @@ type Server struct {
 	db     *pgxpool.Pool
 	auth   *AuthService
 	config Config
+	// 按账号广播变更通知；单进程内有效，多实例部署见 README 的已知边界。
+	hub *watchHub
+}
+
+// notifyChange 在事务提交后调用，只推送新游标，不推会话内容。
+// 判空是为了让不关心实时通知的测试/调用方无需构造 hub。
+func (s *Server) notifyChange(userID string, rev int64) {
+	if s.hub != nil {
+		s.hub.notify(userID, rev)
+	}
+}
+
+func (s *Server) disconnectWatchToken(token string) {
+	if s.hub != nil {
+		s.hub.disconnectToken(hashToken(token))
+	}
 }
 
 type credentialsRequest struct {
@@ -57,6 +73,8 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
+	// token 已撤销，立即断开它建立的订阅连接（其它设备的 token 不受影响）。
+	s.disconnectWatchToken(bearer(r))
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
@@ -275,6 +293,7 @@ func (s *Server) handlePutSession(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
+	s.notifyChange(userID, newRev)
 	writeJSON(w, http.StatusOK, map[string]any{"rev": newRev})
 }
 
@@ -334,6 +353,7 @@ func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
+	s.notifyChange(userID, newRev)
 	writeJSON(w, http.StatusOK, map[string]any{"rev": newRev})
 }
 
@@ -382,6 +402,7 @@ func (s *Server) handlePutFile(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
+	s.notifyChange(userID, newRev)
 	writeJSON(w, http.StatusOK, map[string]any{"rev": newRev})
 }
 

@@ -14,6 +14,7 @@
 - **无损原生格式**：会话以客户端 IndexedDB 中的 `Session` JSON 存入 `payload JSONB`，服务端**不解析、不改写**内部字段，所有字段与值完整保留。现有的 ZIP 导入导出是给其他 app 兼容用的有损归档，本服务不使用、也不影响它。
   > 注意 `jsonb` 会**重排对象键的顺序**（例如 `{nested, keepMe}` 取回后变成 `{keepMe, nested}`），因此字节级并非逐字相同，语义上无损。前端按字段名读取，不受影响；但如果将来要用 `JSON.stringify` 结果做哈希或比较，需要先规范化键顺序。
 - **增量游标**：每个用户一个单调递增的 `rev`。任何会话写入、删除（墓碑）、附件上传都会 `+1`。客户端用 `since` 增量拉取。
+- **实时通知**：`GET /api/watch` 是 WebSocket 端点，写事务提交后按账号广播 `{type:"changed",rev}`。客户端收到后仍走原有增量拉取，通知丢失或重复都不影响一致性；定时轮询始终保留作兜底。
 - **乐观锁**：上传会话须带 `baseRev`（客户端上次看到的服务端版本），不一致返回 `409`，由客户端决定用哪一版。避免多设备静默互相覆盖。
 - **墓碑删除**：删除会话写 `deleted = true` 并保留记录，保证其他设备能收到删除事件，不会把已删会话"复活"。
 - **附件解耦**：附件按客户端 `file.id` 独立存储，服务端不做引用计数 GC，避免设备 A 删会话时误删设备 B 仍引用的图片。
@@ -24,9 +25,15 @@
 ```sh
 cp .env.example .env
 # 至少修改 SYNC_ALLOWED_ORIGINS 为你的前端地址
-docker compose up -d
+docker compose up -d --build   # 源码更新后必须带 --build，否则会复用旧镜像
 curl http://localhost:8080/healthz   # -> ok
+# 确认实时推送端点已包含在镜像里：400 为正常，404 说明跑的是旧镜像
+curl -s -o /dev/null -w '%{http_code}\n' http://localhost:8080/api/watch
 ```
+
+> 常见坑：`docker compose up -d` 只按现有镜像创建容器，**不会重新编译**。
+> 更新代码（例如加入 WebSocket 支持）后若漏掉 `--build`，REST 同步仍正常，
+> 但 `/api/watch` 返回 404，前端会一直连不上实时推送。
 
 或直接跑二进制（需已有 Postgres）：
 
@@ -42,7 +49,7 @@ go run .
 
 ```sh
 # 终端 1：同步服务 + Postgres
-cd sync-server && cp .env.example .env && docker compose up -d
+cd sync-server && cp .env.example .env && docker compose up -d --build
 
 # 终端 2：前端开发服务器（http://localhost:8090）
 cd .. && pnpm dev
@@ -53,7 +60,15 @@ cd .. && pnpm dev
 否则浏览器预检会被拦。HTTP 仅用于本机联调，公网部署务必上 HTTPS。
 
 验证两台设备：用两个不同的浏览器用户配置（或无痕窗口）打开同一前端地址，
-用同一账号登录，在其中一个新建对话，另一个会在切回前台或下一轮定时同步时看到。
+用同一账号登录，在其中一个新建对话，另一个会立即收到 WebSocket 通知并自动拉取（设置 → 云同步里显示「实时推送已连接」）；
+若长连接被代理拦掉，则退回切回前台 / 60 秒定时同步。
+
+实时推送连不上时按顺序排查（设置 → 云同步会显示当前状态）：
+
+1. `curl -s -o /dev/null -w '%{http_code}\n' http://localhost:8080/api/watch`：
+   `400` 表示端点存在（不带 Upgrade 头属正常），`404` 表示跑的是旧镜像，重新执行 `docker compose up -d --build`。
+2. `SYNC_ALLOWED_ORIGINS` 要与浏览器地址栏的 origin **完全一致**；`http://localhost:8090` 与 `http://127.0.0.1:8090` 是两个不同来源，不匹配时握手返回 `403`。
+3. 浏览器控制台看 WebSocket 握手状态码；公网部署还要确认反向代理放行 Upgrade，并把该路径读超时设到 70 秒以上。
 
 ## 配置项
 
@@ -71,7 +86,8 @@ cd .. && pnpm dev
 
 ## API
 
-除注册、登录和 `/healthz` 外，所有接口都需要 `Authorization: Bearer <token>`。
+除注册、登录和 `/healthz` 外，所有接口都需要 `Authorization: Bearer <token>`；
+`/api/watch` 是唯一例外（浏览器 WebSocket 无法设置该头，改用首帧认证，见下文）。
 用户名 3-32 位字母/数字/`_ . -`，密码 8-128 位；密码用 bcrypt 加盐哈希存储。
 
 ### 认证
@@ -95,6 +111,7 @@ cd .. && pnpm dev
 | DELETE | `/api/session/{id}?baseRev=<rev>` | 删除会话（写墓碑） |
 | PUT | `/api/file/{id}` | 上传附件原件（二进制，Content-Type 即 MIME） |
 | GET | `/api/file/{id}` | 下载附件原件 |
+| GET | `/api/watch` | WebSocket 变更通知（首帧携带 token 认证，见下文） |
 
 **`GET /api/changes` 响应**
 
@@ -135,6 +152,33 @@ cd .. && pnpm dev
 错误码统一为 `{error, message}`：`400` 参数非法、`401` 未登录、`404` 不存在、
 `409` 冲突、`413` 超限、`429` 登录限流。
 
+### 实时通知（WebSocket）
+
+`GET /api/watch` 让同一账号的其它设备立刻知道「有变更」。服务端只推版本号，不推会话内容，
+客户端收到后仍走 `GET /api/changes` 增量拉取，因此通知丢失、乱序或重复都不会破坏数据；
+前端另保留 60 秒定时同步作为兜底，旧版服务端或代理未放行 Upgrade 时自动降级。
+
+浏览器 WebSocket API 不能设置 `Authorization` 头，把 token 放进 URL 又会留在代理日志里，
+因此采用**首帧认证**：连接建立后客户端立即发送（5 秒内，否则断开）：
+
+```json
+{ "type": "auth", "token": "<登录 token>" }
+```
+
+校验通过后服务端回复 `{"type":"ready","rev":42}`（`rev` 是当前游标，客户端据此补拉一次），
+随后在任意会话写入、删除、附件上传的事务提交后广播 `{"type":"changed","rev":43}`。
+
+| 方向 | 消息 | 说明 |
+|---|---|---|
+| 服务端 → 客户端 | `{"type":"ping"}` | 每 25 秒一次，客户端需回 `{"type":"pong"}` |
+| 服务端 → 客户端 | `{"type":"auth_required"}` | token 无效或过期，随后关闭连接 |
+| 服务端 → 客户端 | `{"type":"error"}` | 服务端临时故障，客户端稍后重连，不清除登录态 |
+
+70 秒未收到任何客户端消息即判定连接死亡；连接最长存活 30 分钟，到期断开让客户端重新认证。
+广播严格按 token 解析出的 `user_id` 隔离；退出登录只断开该 token 建立的连接，不影响其它设备。
+`Origin` 校验沿用 `SYNC_ALLOWED_ORIGINS`（同源、`file://` 产生的 `null` 与非浏览器客户端放行），
+因为 WebSocket 没有 CORS 预检，必须在握手阶段自行拒绝未知来源。
+
 ## 前端接入（已实现）
 
 前端代码在 `src/services/sync/`，设置弹窗新增「云同步」分区。落地时的几个关键约定：
@@ -147,6 +191,7 @@ cd .. && pnpm dev
 6. **冲突 `409`**：v1 会话级 Last-Writer-Wins（服务端 rev 大者胜），拉回服务端版本覆盖本地并 toast 提示。
 7. 同步失败不阻塞聊天：本地照常写 IndexedDB，变更排队 + 指数退避重试；401 自动清除登录态并要求重新登录。
 8. 切换服务器/账号时弹确认，说明本地会话会保留并一并上传到新账号；切换后清空同步进度重新对账。
+9. **实时通知**：`watch.ts` 连接 `/api/watch`，收到 `ready` / `changed` 后 200ms 合并触发一次完整同步；断线按指数退避重连，切回前台立即重试，`auth_required` 时清除登录态。60 秒定时同步始终保留兜底，连接状态显示在设置页。
 
 ## 测试
 
@@ -158,12 +203,14 @@ SYNC_TEST_DATABASE_URL='postgres://chatsync:chatsync@localhost:5432/chatsync?ssl
 ```
 
 集成测试用随机用户名后缀隔离数据，**不会清空数据库**，可以安全地对已在使用中的库运行。
-覆盖：注册登录、用户隔离、会话无损往返、乐观锁冲突、删除墓碑、附件往返、分页游标不丢数据、未授权访问。
+覆盖：注册登录、用户隔离、会话无损往返、乐观锁冲突、删除墓碑、附件往返、分页游标不丢数据、未授权访问，以及实时通知的账号隔离、Origin 校验、无效 token 与登出断连。
 
 ## 安全与运维注意事项
 
 - **自部署走 HTTP 时，用户名密码和聊天记录是明文传输的**。局域网内也有风险，公网部署务必在前面挂 HTTPS 反代并设置 `SYNC_REQUIRE_HTTPS=true`。
-- `SYNC_ALLOWED_ORIGINS` 必须精确列出前端来源。跨域带凭证不允许通配 `*`，配置错误会直接导致浏览器预检失败。
+- `SYNC_ALLOWED_ORIGINS` 必须精确列出前端来源。跨域带凭证不允许通配 `*`，配置错误会直接导致浏览器预检失败；WebSocket 握手也按同一份白名单校验 `Origin`。
+- 反向代理必须放行 WebSocket Upgrade（`Connection: Upgrade` / `Upgrade: websocket`），并把该路径的读超时设到 70 秒以上；否则前端会自动退回定时同步。
+- `/api/watch` 受进程内连接总数上限（2048，含未认证连接）保护；公网部署仍建议在网关层按 IP 限制并发长连接。
 - 登录限流目前是**进程内**计数；多实例托管时需要在网关层再做一层全局限流。
 - 当前版本**没有注册开关、配额、审计日志和附件 GC**。托管给不特定用户前，建议补上注册开关（环境变量控制）、单用户容量上限、以及墓碑/附件的定期清理策略。
 - 附件以 `BYTEA` 存在 Postgres 中，量大时数据库会膨胀。数据量增长后可迁到对象存储，接口保持不变。
@@ -171,6 +218,7 @@ SYNC_TEST_DATABASE_URL='postgres://chatsync:chatsync@localhost:5432/chatsync?ssl
 
 ## 已知边界
 
+- 实时通知的订阅表是**进程内**的：多实例部署时，某台实例上的写入只会通知连到同一实例的客户端，连到其它实例的客户端要等切回前台或下一轮 60 秒轮询。彻底解决需要 Postgres `LISTEN/NOTIFY` 或消息总线；数据一致性不受影响。
 - 冲突粒度是**会话级**，同一会话两端同时编辑会互相覆盖；消息级合并留待后续版本。
 - 附件上传目前按 `file.id` 幂等覆盖，无版本校验；配合会话里记录的 `baseRev` 使用。
 - 墓碑不会自动清理，长期运行后首次 `since=0` 的全量同步会变慢，需要清理策略。

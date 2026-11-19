@@ -117,6 +117,15 @@ export const SyncSettings = () => {
     if (status.pending > 0) {
       parts.push(t('syncStatusPending', { count: status.pending }))
     }
+    if (status.watch === 'connected') {
+      parts.push(t('syncWatchConnected'))
+    } else if (status.watch === 'connecting') {
+      parts.push(t('syncWatchConnecting'))
+    } else if (status.watch === 'unsupported') {
+      parts.push(t('syncWatchUnsupported'))
+    } else if (status.watch === 'retrying') {
+      parts.push(t('syncWatchRetrying'))
+    }
     return parts.join(' · ')
   }
 

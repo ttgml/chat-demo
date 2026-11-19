@@ -45,7 +45,7 @@ Settings → Data → Delete all chats clears all local conversations, original 
 
 ### Cloud sync (optional)
 
-Settings → Cloud sync accepts a sync server address and a username/password to sync conversations and original images across devices. This is an **optional external service**: without it the app remains fully local, and local storage is unchanged. When enabled, conversations are uploaded to that server and isolated per account.
+Settings → Cloud sync accepts a sync server address and a username/password to sync conversations and original images across devices. This is an **optional external service**: without it the app remains fully local, and local storage is unchanged. When enabled, conversations are uploaded to that server and isolated per account. Writes from other devices are pushed over WebSocket and pulled in immediately; if a long-lived connection is unavailable (older server or a proxy blocking upgrades), the settings page shows the reason and the app falls back to scheduled sync automatically. See [sync-server](sync-server/README.md) for troubleshooting.
 
 The sync server can be self-hosted or used as a hosted instance; both run the same code. See [sync-server](sync-server/README.md). Sync uses the lossless native session format and is a separate pipeline from the ZIP import/export above — the ZIP format is unchanged and remains compatible with other apps. Only the login token is persisted, never the password. With an HTTP address, passwords and conversations travel in plaintext, so enable HTTPS for public deployments.
 

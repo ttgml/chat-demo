@@ -208,6 +208,11 @@ export const en = {
   syncStatusNever: 'Never synced',
   syncStatusPending: '{count} changes waiting to upload',
   syncStatusLastAt: 'Last synced {time}',
+  syncWatchConnected: 'Live updates connected',
+  syncWatchConnecting: 'Connecting live updates',
+  syncWatchRetrying: 'Live updates reconnecting, timed sync still active',
+  syncWatchUnsupported:
+    'Live updates unavailable: update the sync server or check the proxy; timed sync is active',
   syncErrorAuth: 'Session expired, please sign in again',
   syncErrorNetwork: 'Cannot reach the sync server. Check your network and server address',
   syncErrorConflict: 'Sync conflict, cloud version applied',
