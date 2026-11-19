@@ -41,7 +41,7 @@ Your API key and settings are stored in the browser's localStorage. Conversation
 
 History import and export in Settings use ZIP archives. After confirmation and successful validation, importing replaces all local conversations and attachments. Exports include conversations and locally available original images, but exclude API keys, settings, and original non-image attachments. See the [history import/export documentation (Chinese)](src/services/chat/history/README.md) for the archive format and preservation details.
 
-Settings → Data → Delete all chats clears all local conversations, original attachments, and unsent drafts after confirmation. It stops ongoing replies and returns to a new chat. Your API key and settings are preserved; files already uploaded to the API service are not deleted. When cloud sync is signed in, the deletion is also synced to the server; when signed out, only the local sync state is reset, and the next sign-in pulls conversations back from the server instead of deleting them there.
+Settings → Data → Delete all chats clears all local conversations, original attachments, and unsent drafts after confirmation. It stops ongoing replies and returns to a new chat. Your API key and settings are preserved; files already uploaded to the API service are not deleted. When cloud sync is signed in, the deletion is also synced to the server; when signed out, only the local sync state is reset, and the next sign-in pulls conversations back from the server instead of deleting them there. Deleting a single conversation while signed out is local-only as well and is restored from the server on the next sign-in; single deletions while signed in still sync normally.
 
 ### Cloud sync (optional)
 

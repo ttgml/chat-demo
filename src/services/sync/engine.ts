@@ -30,6 +30,7 @@ import {
   markFileUploaded,
   markPending,
   markPendingMany,
+  prepareLocalDeletion,
   resetSyncMeta,
   resetSyncProgress,
   setAccountKey,
@@ -676,6 +677,13 @@ const handleChange = (event: ChatChangeEvent) => {
     return
   }
   if (!event.id) {
+    return
+  }
+  // 未登录时删除单个会话只影响本地：不写云端墓碑，下次登录时从服务端合并回来。
+  if (event.type === 'delete' && config.token === null) {
+    void prepareLocalDeletion(event.id, event.fileIds)
+      .then(updatePendingCount)
+      .catch(() => {})
     return
   }
   const item: PendingItem = {

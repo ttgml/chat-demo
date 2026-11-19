@@ -86,6 +86,48 @@ export const markPendingMany = async (items: readonly PendingItem[]): Promise<vo
   await Promise.all([...items.map((item) => store.put(item, item.id)), tx.done])
 }
 
+/**
+ * 未登录时删除单个会话：不写云端墓碑，而是让下次登录重新拉取该会话。
+ * - 丢掉该会话的待上传项，避免退出前的编辑/删除被当成云端意图；
+ * - 删除该会话的 baseRev，使 pull 不会再按 localRev 跳过它；
+ * - 清掉被一起删掉的附件原件的上传记录，并同样回退游标到其 rev - 1，
+ *   否则重新登录后会话能恢复、图片却因“已下载”而永远不会补回来；
+ * - 把全局游标回退到这些 rev 的最小值 - 1，让下一次 pull 重新经过这些变更。
+ *   服务端还在则恢复会话与原件，服务端也已删除则保持删除。
+ */
+export const prepareLocalDeletion = async (
+  id: string,
+  fileIds: readonly string[] = []
+): Promise<void> => {
+  const db = await getDB()
+  const tx = db.transaction(['meta', 'sessionRev', 'pending', 'uploadedFiles'], 'readwrite')
+  const [rev, current, ...fileRevs] = await Promise.all([
+    tx.objectStore('sessionRev').get(id),
+    tx.objectStore('meta').get('lastSyncedRev'),
+    ...fileIds.map((fileId) => tx.objectStore('uploadedFiles').get(fileId)),
+  ])
+  let target: number | null = null
+  if (typeof rev === 'number' && rev > 0) {
+    target = rev - 1
+  }
+  await tx.objectStore('pending').delete(id)
+  await tx.objectStore('sessionRev').delete(id)
+  for (const [index, fileId] of fileIds.entries()) {
+    await tx.objectStore('uploadedFiles').delete(fileId)
+    const fileRev = fileRevs[index]
+    if (typeof fileRev === 'number' && fileRev > 0) {
+      const candidate = fileRev - 1
+      if (target === null || candidate < target) {
+        target = candidate
+      }
+    }
+  }
+  if (target !== null && (typeof current !== 'number' || target < current)) {
+    await tx.objectStore('meta').put(target, 'lastSyncedRev')
+  }
+  await tx.done
+}
+
 export const clearPending = async (id: string): Promise<void> => {
   await (await getDB()).delete('pending', id)
 }

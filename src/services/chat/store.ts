@@ -42,7 +42,7 @@ export type ReplaceReason = 'import' | 'clear'
 
 export type ChatChangeEvent =
   | { type: 'upsert'; id: string }
-  | { type: 'delete'; id: string }
+  | { type: 'delete'; id: string; fileIds: readonly string[] }
   | { type: 'replace'; reason: ReplaceReason }
 
 const chatChangeListeners = new Set<(event: ChatChangeEvent) => void>()
@@ -579,7 +579,7 @@ const removeSessionData = async (id: string): Promise<boolean> => {
     if (epoch !== historyEpoch) {
       return false
     }
-    await db.deleteSession(id)
+    const removedFileIds = await db.deleteSession(id)
     if (epoch !== historyEpoch) {
       return true
     }
@@ -601,7 +601,7 @@ const removeSessionData = async (id: string): Promise<boolean> => {
       ),
       activeId: state.activeId === id ? null : state.activeId,
     }))
-    emitChatChange({ type: 'delete', id })
+    emitChatChange({ type: 'delete', id, fileIds: removedFileIds })
     return true
   } catch (error) {
     db.reportStorageError('delete session')(error)

@@ -123,8 +123,13 @@ export const renameSession = async (id: string, title: string): Promise<void> =>
   ])
 }
 
-/** 删除会话，仅清理已无会话引用的本地原件；远端文件不删。 */
-export const deleteSession = async (sessionId: string): Promise<void> => {
+/**
+ * 删除会话，仅清理已无会话引用的本地原件；远端文件不删。
+ * 返回实际删掉原件的附件 id：同步层在未登录删除时要用它清掉上传记录，
+ * 否则重新登录后会话能恢复、图片却因为被标记为已下载而不再拉取。
+ */
+export const deleteSession = async (sessionId: string): Promise<string[]> => {
+  const removedFiles: string[] = []
   const tx = (await getDB()).transaction(['sessions', 'sessionSummaries', 'files'], 'readwrite')
   await Promise.all([
     (async () => {
@@ -136,6 +141,7 @@ export const deleteSession = async (sessionId: string): Promise<void> => {
         for (const id of summary?.fileIds ?? []) {
           if ((await summaries.index('fileIds').count(id)) === 0) {
             await tx.objectStore('files').delete(id)
+            removedFiles.push(id)
           }
         }
       } catch (error) {
@@ -145,6 +151,7 @@ export const deleteSession = async (sessionId: string): Promise<void> => {
     })(),
     tx.done,
   ])
+  return removedFiles
 }
 
 const putFiles = async (store: 'files' | 'filesStaging', files: StoredFile[]) => {
