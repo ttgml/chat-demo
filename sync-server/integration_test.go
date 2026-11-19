@@ -31,6 +31,12 @@ func uniqueName(base string) string { return base + "_" + testRunID }
 // 集成测试需要真实 Postgres：SYNC_TEST_DATABASE_URL=postgres://... go test ./...
 // 未设置时自动跳过，便于纯单元测试环境运行。
 func testServer(t *testing.T) (*httptest.Server, string) {
+	return testServerWithConfig(t, func(*Config) {})
+}
+
+// testServerWithConfig 允许单个测试收紧配置（例如更小的会话体积上限），
+// 避免为了验证限额而构造几十 MB 的请求。
+func testServerWithConfig(t *testing.T, mutate func(*Config)) (*httptest.Server, string) {
 	t.Helper()
 	url := os.Getenv("SYNC_TEST_DATABASE_URL")
 	if url == "" {
@@ -51,6 +57,7 @@ func testServer(t *testing.T) (*httptest.Server, string) {
 		LoginLimit:      100,
 		LoginWindow:     time.Minute,
 	}
+	mutate(&cfg)
 	auth := newAuthService(db, cfg.TokenTTL, cfg.LoginLimit, cfg.LoginWindow)
 	srv := &Server{db: db, auth: auth, config: cfg}
 	ts := httptest.NewServer(routes(srv, cfg))
@@ -439,5 +446,125 @@ func TestAuthFlow(t *testing.T) {
 	}, &result)
 	if status != 409 {
 		t.Fatalf("duplicate register status=%d", status)
+	}
+}
+
+// 回归测试：服务端曾先检查 baseRev、再递增 user_rev，两个并发 PUT 会同时通过检查，
+// 后提交者静默覆盖先提交者且双方都收到 200。现在先拿 user_rev 行锁，必须恰好一个 200、一个 409。
+func TestConcurrentPutRespectsBaseRev(t *testing.T) {
+	ts, _ := testServer(t)
+	token := registerUser(t, ts, "raceuser")
+	makeSession := func(title string) map[string]any {
+		return map[string]any{
+			"id": "race-1", "title": title, "createdAt": 1000, "updatedAt": 1000,
+			"messages": []any{},
+		}
+	}
+	var created struct {
+		Rev int64 `json:"rev"`
+	}
+	status := doJSON(t, ts, "PUT", "/api/session/race-1", token, map[string]any{
+		"baseRev": 0, "updatedAt": 1000, "session": makeSession("initial"),
+	}, &created)
+	if status != 200 || created.Rev <= 0 {
+		t.Fatalf("create status=%d rev=%d", status, created.Rev)
+	}
+
+	type result struct {
+		status int
+		title  string
+		err    error
+	}
+	start := make(chan struct{})
+	results := make(chan result, 2)
+	for _, title := range []string{"device-a", "device-b"} {
+		title := title
+		go func() {
+			<-start
+			body, err := json.Marshal(map[string]any{
+				"baseRev": created.Rev, "updatedAt": 2000, "session": makeSession(title),
+			})
+			if err != nil {
+				results <- result{err: err}
+				return
+			}
+			req, err := http.NewRequest("PUT", ts.URL+"/api/session/race-1", bytes.NewReader(body))
+			if err != nil {
+				results <- result{err: err}
+				return
+			}
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("Authorization", "Bearer "+token)
+			resp, err := ts.Client().Do(req)
+			if err != nil {
+				results <- result{err: err}
+				return
+			}
+			_, _ = io.Copy(io.Discard, resp.Body)
+			resp.Body.Close()
+			results <- result{status: resp.StatusCode, title: title}
+		}()
+	}
+	close(start)
+
+	var ok, conflict int
+	winner := ""
+	for i := 0; i < 2; i++ {
+		res := <-results
+		if res.err != nil {
+			t.Fatalf("concurrent put failed: %v", res.err)
+		}
+		switch res.status {
+		case http.StatusOK:
+			ok++
+			winner = res.title
+		case http.StatusConflict:
+			conflict++
+		default:
+			t.Fatalf("unexpected status %d", res.status)
+		}
+	}
+	if ok != 1 || conflict != 1 {
+		t.Fatalf("want exactly one 200 and one 409, got ok=%d conflict=%d", ok, conflict)
+	}
+
+	var got struct {
+		Session map[string]any `json:"session"`
+	}
+	doJSON(t, ts, "GET", "/api/session/race-1", token, nil, &got)
+	if got.Session["title"] != winner {
+		t.Fatalf("stored title = %v, want winner %q", got.Session["title"], winner)
+	}
+}
+
+// 回归测试：SYNC_MAX_SESSION_BYTES 之前只参与全局 body 上限计算，handler 内没有精确检查，
+// 会话实际可以膨胀到 MaxFileBytes 的大小。
+func TestPutSessionRespectsMaxSessionBytes(t *testing.T) {
+	ts, _ := testServerWithConfig(t, func(cfg *Config) {
+		cfg.MaxSessionBytes = 1024
+		cfg.MaxFileBytes = 1 << 20
+	})
+	token := registerUser(t, ts, "sizeuser")
+
+	tooLarge := map[string]any{
+		"id": "big", "title": strings.Repeat("x", 2048), "createdAt": 1,
+		"updatedAt": 1, "messages": []any{},
+	}
+	status := doJSON(t, ts, "PUT", "/api/session/big", token, map[string]any{
+		"baseRev": 0, "updatedAt": 1, "session": tooLarge,
+	}, nil)
+	if status != http.StatusRequestEntityTooLarge {
+		t.Fatalf("oversized session status=%d, want 413", status)
+	}
+
+	small := map[string]any{
+		"id": "small", "title": "ok", "createdAt": 1,
+		"updatedAt": 1, "messages": []any{},
+	}
+	status = doJSON(t, ts, "PUT", "/api/session/small", token, map[string]any{
+		"baseRev": 0, "updatedAt": 1, "session": small,
+	}, nil)
+	if status != http.StatusOK {
+		t.Fatalf("session under limit status=%d, want 200", status)
 	}
 }

@@ -18,6 +18,10 @@ func TestValidateCredentials(t *testing.T) {
 		{"bad username chars", "a b", "password123", true},
 		{"short password", "alice", "1234567", true},
 		{"empty password", "alice", "", true},
+		// bcrypt 只支持 72 字节；超过时必须在校验阶段返回 400，而不是在哈希时 500。
+		{"password over bcrypt limit", "alice", strings.Repeat("a", 73), true},
+		{"multibyte password over limit", "alice", strings.Repeat("密", 25), true},
+		{"password at bcrypt limit", "alice", strings.Repeat("a", 72), false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

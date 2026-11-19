@@ -2,15 +2,20 @@ import { useSyncConfig } from './config.js'
 import { SyncError, type SyncChanges, type SyncErrorBody } from './types.js'
 
 const REQUEST_TIMEOUT = 20_000
+/** 大附件在移动网络下可能远超普通 API 超时；32MB 按 2Mbps 上传就要两分钟。 */
+const FILE_TIMEOUT = 120_000
 
 const baseUrl = (): string => useSyncConfig.getState().serverUrl
 
 const tokenOf = (): string => useSyncConfig.getState().token ?? ''
 
 /** 合并外部取消信号与超时，不依赖较新的 AbortSignal.any */
-const withTimeout = (signal?: AbortSignal): { signal: AbortSignal; cancel: () => void } => {
+const withTimeout = (
+  timeout: number,
+  signal?: AbortSignal
+): { signal: AbortSignal; cancel: () => void } => {
   const controller = new AbortController()
-  const timer = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT)
+  const timer = window.setTimeout(() => controller.abort(), timeout)
   const onAbort = () => controller.abort()
   signal?.addEventListener('abort', onAbort, { once: true })
   return {
@@ -43,10 +48,11 @@ const readErrorBody = async (response: Response): Promise<SyncErrorBody> => {
 const request = async (
   path: string,
   init: RequestInit & { auth?: boolean } = {},
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  timeout = REQUEST_TIMEOUT
 ): Promise<Response> => {
   const { auth = true, headers, ...rest } = init
-  const combined = withTimeout(signal)
+  const combined = withTimeout(timeout, signal)
   const requestHeaders = new Headers(headers)
   if (auth) {
     requestHeaders.set('Authorization', `Bearer ${tokenOf()}`)
@@ -84,9 +90,10 @@ const request = async (
 const jsonRequest = async <T>(
   path: string,
   init: RequestInit & { auth?: boolean } = {},
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  timeout = REQUEST_TIMEOUT
 ): Promise<T> => {
-  const response = await request(path, init, signal)
+  const response = await request(path, init, signal, timeout)
   return (await response.json()) as T
 }
 
@@ -188,8 +195,11 @@ export const syncPutFile = (id: string, blob: Blob, signal?: AbortSignal) =>
       headers: { 'Content-Type': blob.type || 'application/octet-stream' },
       body: blob,
     },
-    signal
+    signal,
+    FILE_TIMEOUT
   )
 
 export const syncGetFile = (id: string, signal?: AbortSignal): Promise<Blob> =>
-  request(`/api/file/${encodeURIComponent(id)}`, {}, signal).then((response) => response.blob())
+  request(`/api/file/${encodeURIComponent(id)}`, {}, signal, FILE_TIMEOUT).then((response) =>
+    response.blob()
+  )

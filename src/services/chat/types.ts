@@ -126,3 +126,18 @@ export const toSessionSummary = (session: SessionSummary): SessionSummary => ({
   createdAt: session.createdAt,
   updatedAt: session.updatedAt,
 })
+
+/**
+ * 会话内容新鲜度：updatedAt 在每次消息落盘时都会刷新，等价于「最后一条消息的时间」；
+ * 外部归档导入的会话可能只带消息时间，因此再取最后一条消息的 createdAt 兜底。
+ * 同步冲突与拉取覆盖都按这个值比较，避免两处判断口径不一致。
+ */
+export const sessionFreshness = (session: Session): number => {
+  let time = session.updatedAt
+  for (const message of session.messages) {
+    if (message.createdAt > time) {
+      time = message.createdAt
+    }
+  }
+  return time
+}

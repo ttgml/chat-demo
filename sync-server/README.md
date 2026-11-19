@@ -88,7 +88,7 @@ cd .. && pnpm dev
 
 除注册、登录和 `/healthz` 外，所有接口都需要 `Authorization: Bearer <token>`；
 `/api/watch` 是唯一例外（浏览器 WebSocket 无法设置该头，改用首帧认证，见下文）。
-用户名 3-32 位字母/数字/`_ . -`，密码 8-128 位；密码用 bcrypt 加盐哈希存储。
+用户名 3-32 位字母/数字/`_ . -`，密码 8-72 字节（bcrypt 上限）；密码用 bcrypt 加盐哈希存储。
 
 ### 认证
 

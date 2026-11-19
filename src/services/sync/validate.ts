@@ -13,13 +13,16 @@ const isNonEmptyString = (value: unknown): value is string =>
  * 校验服务端返回的会话 JSON。
  * 服务端原样存储客户端 payload，不解析内部字段，因此落库前必须在这里做结构检查，
  * 避免损坏或恶意数据写进 IndexedDB 后污染本地状态。
+ * expectedId 用于确认 payload 与请求的会话 id 一致：主库按 payload.id 落键，
+ * 若两者不一致会写出一个 id 对不上的幽灵会话，并让真正的 id 永远无法同步。
  */
-export const isSessionPayload = (value: unknown): value is Session => {
+export const isSessionPayload = (value: unknown, expectedId?: string): value is Session => {
   if (!isRecord(value)) {
     return false
   }
   if (
     !isNonEmptyString(value.id) ||
+    (expectedId !== undefined && value.id !== expectedId) ||
     typeof value.title !== 'string' ||
     !isFiniteNumber(value.createdAt) ||
     !isFiniteNumber(value.updatedAt) ||

@@ -260,6 +260,10 @@ func (s *Server) handlePutSession(w http.ResponseWriter, r *http.Request) {
 		writeError(w, fail(http.StatusBadRequest, "invalid_session", "session must be valid JSON"))
 		return
 	}
+	if int64(len(body.Session)) > s.config.MaxSessionBytes {
+		writeError(w, errTooLarge)
+		return
+	}
 	userID := userFrom(r)
 	tx, err := s.db.Begin(r.Context())
 	if err != nil {
@@ -267,6 +271,15 @@ func (s *Server) handlePutSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback(r.Context())
+
+	// 先递增用户版本号拿到 user_rev 行锁，再检查 baseRev。
+	// 若先 SELECT 后递增，两个并发 PUT 会同时读到旧 rev 并都通过检查，
+	// 后提交者静默覆盖先提交者且双方都收到 200。
+	newRev, err := nextRev(r.Context(), tx, userID)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
 
 	var storedRev int64
 	var deleted bool
@@ -284,11 +297,6 @@ func (s *Server) handlePutSession(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusConflict, map[string]any{
 			"error": "conflict", "message": errConflict.Message, "serverRev": storedRev, "deleted": deleted,
 		})
-		return
-	}
-	newRev, err := nextRev(r.Context(), tx, userID)
-	if err != nil {
-		writeError(w, err)
 		return
 	}
 	_, err = tx.Exec(r.Context(), `
@@ -330,6 +338,13 @@ func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 	}
 	defer tx.Rollback(r.Context())
 
+	// 与 PUT 一样先拿 user_rev 行锁，保证并发删除时 baseRev 检查不会被两个事务同时通过。
+	newRev, err := nextRev(r.Context(), tx, userID)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+
 	var storedRev int64
 	var deleted bool
 	err = tx.QueryRow(r.Context(),
@@ -346,11 +361,6 @@ func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusConflict, map[string]any{
 			"error": "conflict", "message": errConflict.Message, "serverRev": storedRev, "deleted": deleted,
 		})
-		return
-	}
-	newRev, err := nextRev(r.Context(), tx, userID)
-	if err != nil {
-		writeError(w, err)
 		return
 	}
 	_, err = tx.Exec(r.Context(), `

@@ -32,8 +32,10 @@ func validateCredentials(username, password string) error {
 	if !usernamePattern.MatchString(username) {
 		return fail(http.StatusBadRequest, "invalid_username", "username must be 3-32 chars of letters, digits, _ . -")
 	}
-	if len(password) < 8 || len(password) > 128 {
-		return fail(http.StatusBadRequest, "invalid_password", "password must be 8-128 chars")
+	// bcrypt 只接受最多 72 字节的密码；按字符数限制会让 25 个汉字左右的长密码
+	// 通过校验后在 GenerateFromPassword 里报错并返回 500。这里按字节数提前拒绝。
+	if len(password) < 8 || len(password) > 72 {
+		return fail(http.StatusBadRequest, "invalid_password", "password must be 8-72 bytes")
 	}
 	return nil
 }

@@ -5,7 +5,7 @@ import {
   useChatStore,
   type ChatChangeEvent,
 } from '../chat/store.js'
-import type { Session } from '../chat/types.js'
+import { sessionFreshness, type Session } from '../chat/types.js'
 import { showToast } from '../../components/base/toastState.js'
 import { clearSyncCredentials, syncAccountKey, syncReady, useSyncConfig } from './config.js'
 import {
@@ -34,7 +34,7 @@ import {
   uploadedFileRev,
   type PendingItem,
 } from './meta.js'
-import { setSyncStatus, syncErrorKey } from './status.js'
+import { setSyncStatus, syncErrorKey, useSyncStatus } from './status.js'
 import { SyncError } from './types.js'
 import { isSessionPayload, sessionFileIds } from './validate.js'
 import { createWatch, type WatchController } from './watch.js'
@@ -86,17 +86,25 @@ const applyOneRemote = async (
   deleted: boolean,
   payload: unknown
 ): Promise<boolean> => {
-  if (!deleted && !isSessionPayload(payload)) {
+  if (!deleted && !isSessionPayload(payload, id)) {
     // 损坏的 payload 绝不能当作删除，否则会抹掉本地数据
     return false
   }
   const session = deleted ? null : (payload as Session)
-  const summaries = await db.applyRemoteChanges({
+  const result = await db.applyRemoteChanges({
     sessions: session ? [session] : [],
     files: [],
     deletedIds: deleted ? [id] : [],
   })
-  applyRemoteSummaries(summaries, session ? [id] : [], deleted ? [id] : [])
+  // 解决冲突期间本地又落盘了更新的版本（例如用户刚好在此刻编辑）：保留本地与队列。
+  if (session && result.skippedSessionIds.includes(id)) {
+    return false
+  }
+  applyRemoteSummaries(
+    result.summaries,
+    session ? result.appliedSessionIds : [],
+    deleted ? [id] : []
+  )
   if (deleted) {
     await deleteSessionRev(id)
   } else {
@@ -106,20 +114,6 @@ const applyOneRemote = async (
 }
 
 type FetchedSession = Awaited<ReturnType<typeof syncGetSession>>
-
-/**
- * 会话新鲜度：updatedAt 在每次消息落盘时都会刷新，等价于「最后一条消息的时间」；
- * 外部归档导入的会话可能只带消息时间，因此再取最后一条消息的 createdAt 兜底。
- */
-const freshness = (session: Session): number => {
-  let time = session.updatedAt
-  for (const message of session.messages) {
-    if (message.createdAt > time) {
-      time = message.createdAt
-    }
-  }
-  return time
-}
 
 /** 采用服务端版本覆盖本地，并丢弃该会话的待上传队列 */
 const adoptRemote = async (id: string, remote: FetchedSession): Promise<boolean> => {
@@ -173,11 +167,11 @@ const resolveConflict = async (
     }
     return adoptRemote(id, remote)
   }
-  if (!isSessionPayload(remote.session)) {
+  if (!isSessionPayload(remote.session, id)) {
     // 损坏数据既不能落库也不能当成删除，保留队列等下次重试
     return false
   }
-  if (local && freshness(local) > freshness(remote.session)) {
+  if (local && sessionFreshness(local) > sessionFreshness(remote.session)) {
     await reupload(id, remote.rev, local)
     return false
   }
@@ -321,10 +315,28 @@ const pullPage = async (
   let overwritten = 0
   let localWins = 0
 
+  // 同一页里同一个会话可能先删除再恢复：变更按 rev 升序返回，后出现的状态才是最终状态。
+  const dropQueuedSession = (id: string) => {
+    const index = sessions.findIndex((session) => session.id === id)
+    if (index !== -1) {
+      sessions.splice(index, 1)
+    }
+    sessionRevs.delete(id)
+  }
+  const dropQueuedDeletion = (id: string) => {
+    for (const list of [deletedIds, removedIds]) {
+      const index = list.indexOf(id)
+      if (index !== -1) {
+        list.splice(index, 1)
+      }
+    }
+  }
+
   for (const change of page.sessions) {
     const localRev = await getSessionRev(change.id)
-    if (!change.deleted && localRev >= change.rev) {
-      // 自己刚上传的回环变更，跳过重复应用
+    // 本地已持有不早于该变更的版本：可能是自己刚上传的回环，也可能是更晚的恢复。
+    // 墓碑也必须跳过，否则旧的删除事件会删掉本地已恢复或已更新的会话。
+    if (localRev >= change.rev) {
       continue
     }
     const remote = await syncGetSession(change.id)
@@ -339,19 +351,24 @@ const pullPage = async (
       ) {
         continue
       }
+      // 更晚的墓碑覆盖同一页里更早的恢复版本。
+      dropQueuedSession(change.id)
       deletedIds.push(change.id)
       removedIds.push(change.id)
-    } else if (!isSessionPayload(remote.session)) {
-      // 损坏数据不能落库，也不能当成删除。游标仍会推进到本页 nextSince，
-      // 因此该会话不会自动重试；只能等服务端修正后由用户重新登录触发全量对账。
-      setSyncStatus({ errorKey: 'syncErrorInvalidData' })
-      continue
     } else {
+      // 服务端最新状态是有效会话：同一页里更早的墓碑作废，不能让它删掉随后恢复的会话。
+      dropQueuedDeletion(change.id)
+      if (!isSessionPayload(remote.session, change.id)) {
+        // 损坏数据不能落库，也不能当成删除。游标仍会推进到本页 nextSince，
+        // 因此该会话不会自动重试；只能等服务端修正后由用户重新登录触发全量对账。
+        setSyncStatus({ errorKey: 'syncErrorInvalidData' })
+        continue
+      }
       // 本地版本比拉下来的更新：不要落库远端旧版本，保留并补上待上传队列，
       // 下一轮 push 会以 serverRev 为 baseRev 把本地版本写回服务端。
       // 列表元数据只有 updatedAt（正常数据里它就是最后一条消息的时间），足够做这个判断。
       const localSummary = localSummaries.get(change.id)
-      if (localSummary && localSummary.updatedAt > freshness(remote.session)) {
+      if (localSummary && localSummary.updatedAt > sessionFreshness(remote.session)) {
         if (!pending.has(change.id)) {
           const item: PendingItem = { id: change.id, kind: 'upsert', updatedAt: Date.now() }
           await markPending(item)
@@ -360,6 +377,8 @@ const pullPage = async (
         localWins += 1
         continue
       }
+      // 同一页里更早的同一会话版本由最新版本替换（GET 返回的是当前版本）。
+      dropQueuedSession(change.id)
       sessions.push(remote.session)
       sessionRevs.set(change.id, remote.rev)
     }
@@ -370,6 +389,7 @@ const pullPage = async (
       overwritten += 1
     }
   }
+  const fileRevs = new Map<string, number>()
   for (const change of page.files) {
     if ((await uploadedFileRev(change.id)) >= change.rev) {
       continue
@@ -377,7 +397,7 @@ const pullPage = async (
     try {
       const blob = await syncGetFile(change.id)
       files.push({ id: change.id, blob })
-      await markFileUploaded(change.id, change.rev)
+      fileRevs.set(change.id, change.rev)
     } catch (error) {
       if (isUnauthorized(error)) {
         throw error
@@ -388,12 +408,18 @@ const pullPage = async (
   }
 
   if (sessions.length > 0 || files.length > 0 || deletedIds.length > 0) {
-    const summaries = await db.applyRemoteChanges({ sessions, files, deletedIds })
-    applyRemoteSummaries(
-      summaries,
-      sessions.map((session) => session.id),
-      deletedIds
-    )
+    const result = await db.applyRemoteChanges({ sessions, files, deletedIds })
+    // 本地在 pull 期间又落盘的会话不会被远端旧版本覆盖；重新排队，下一轮 push 上传本地版本。
+    for (const id of result.skippedSessionIds) {
+      await markPending({ id, kind: 'upsert', updatedAt: Date.now() })
+    }
+    localWins += result.skippedSessionIds.length
+    applyRemoteSummaries(result.summaries, result.appliedSessionIds, deletedIds)
+  }
+  // 落库成功后才记录附件版本：applyRemoteChanges 失败（例如存储配额不足）时
+  // 不能把附件标记为已同步，否则下次不会重试，本地会永久缺少原件。
+  for (const [id, rev] of fileRevs) {
+    await markFileUploaded(id, rev)
   }
   await commitSyncProgress(page.nextSince, sessionRevs, removedIds)
   return { nextSince: page.nextSince, hasMore: page.hasMore, overwritten, localWins }
@@ -457,10 +483,25 @@ const reconcile = async (
   }
 }
 
+/** 同步不可用（未登录、已暂停、凭据失效）时的状态。
+ * 401 会先清空 token，配置订阅随后触发一次 refreshSyncState；如果这里无条件写 disabled，
+ * 会把刚设置的 authRequired 覆盖掉，用户只能看到「未启用」而不知道需要重新登录。 */
+const showSyncUnavailable = (resetPending: boolean) => {
+  if (useSyncStatus.getState().phase === 'authRequired') {
+    setSyncStatus({ phase: 'authRequired', errorKey: 'syncErrorAuth' })
+    return
+  }
+  setSyncStatus({
+    phase: 'disabled',
+    errorKey: null,
+    ...(resetPending ? { pending: 0 } : {}),
+  })
+}
+
 /** 一次完整同步：先推送本地变更，再拉取远端变更 */
 const syncOnce = async (): Promise<void> => {
   if (stopped || !syncReady(useSyncConfig.getState())) {
-    setSyncStatus({ phase: 'disabled', errorKey: null })
+    showSyncUnavailable(false)
     return
   }
   if (!useChatStore.getState().ready || useChatStore.getState().importingHistory) {
@@ -594,7 +635,7 @@ export const syncNow = (): Promise<void> => enqueue(syncOnce)
 export const refreshSyncState = (): Promise<void> =>
   enqueue(async () => {
     if (!syncReady(useSyncConfig.getState())) {
-      setSyncStatus({ phase: 'disabled', errorKey: null, pending: 0 })
+      showSyncUnavailable(true)
       return
     }
     await syncOnce()

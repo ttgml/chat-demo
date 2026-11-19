@@ -1,5 +1,5 @@
 import { openDB, type DBSchema, type IDBPDatabase } from 'idb'
-import { toSessionSummary, type Session, type SessionSummary } from './types.js'
+import { sessionFreshness, toSessionSummary, type Session, type SessionSummary } from './types.js'
 
 /** IndexedDB 存储结构版本；新增或调整存储、索引时递增。 */
 const DB_VERSION = 11
@@ -257,13 +257,28 @@ export type RemoteChanges = {
   deletedIds: string[]
 }
 
+export type ApplyRemoteResult = {
+  /** 提交后的完整会话列表 */
+  summaries: SessionSummary[]
+  /** 实际落库的会话 id（本地已有更新版本的会被跳过） */
+  appliedSessionIds: string[]
+  /** 本地版本更新而未被远端覆盖的会话 id，调用方需要把它们重新排入上传队列 */
+  skippedSessionIds: string[]
+}
+
 /**
  * 增量应用远端变更：在单个事务中 upsert 会话与附件、应用删除墓碑，返回提交后的完整列表。
  * 与 commitStaging 不同，这里不清空任何现有数据，也不中断正在生成的回复。
  * 删除时不清理 files 原件：同一附件可能被本机其他会话引用，也可能被其他设备上传，
  * 本地引用计数不足以判断全局是否还需要，统一交由后续清理策略处理。
+ *
+ * 会话写入在事务内比对本地与远端的内容新鲜度（sessionFreshness）：pull 可能持续数十秒，
+ * 期间用户对某个会话的新编辑会晚于远端快照落盘。若直接覆盖，用户这次的编辑会被静默丢弃。
+ * 这里跳过本地更新的会话，把 id 返回给同步引擎重新排队上传。
  */
-export const applyRemoteChanges = async (changes: RemoteChanges): Promise<SessionSummary[]> => {
+export const applyRemoteChanges = async (changes: RemoteChanges): Promise<ApplyRemoteResult> => {
+  const appliedSessionIds: string[] = []
+  const skippedSessionIds: string[] = []
   const tx = (await getDB()).transaction(['sessions', 'sessionSummaries', 'files'], 'readwrite')
   const write = async () => {
     try {
@@ -271,8 +286,14 @@ export const applyRemoteChanges = async (changes: RemoteChanges): Promise<Sessio
       const summaries = tx.objectStore('sessionSummaries')
       const files = tx.objectStore('files')
       for (const session of changes.sessions) {
+        const existing = await sessions.get(session.id)
+        if (existing && sessionFreshness(existing) > sessionFreshness(session)) {
+          skippedSessionIds.push(session.id)
+          continue
+        }
         await sessions.put(session)
         await summaries.put(storedSummary(session))
+        appliedSessionIds.push(session.id)
       }
       for (const id of changes.deletedIds) {
         await sessions.delete(id)
@@ -289,5 +310,9 @@ export const applyRemoteChanges = async (changes: RemoteChanges): Promise<Sessio
   await Promise.all([write(), tx.done])
   // 事务提交后统一读取列表，避免调用方在中途拿到不一致的快照。
   const all = await (await getDB()).getAll('sessionSummaries')
-  return all.map(toSessionSummary)
+  return {
+    summaries: all.map(toSessionSummary),
+    appliedSessionIds,
+    skippedSessionIds,
+  }
 }

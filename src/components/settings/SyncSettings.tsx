@@ -112,7 +112,10 @@ export const SyncSettings = () => {
     } catch {
       // 服务器不可达或 token 已失效时，本地仍要清除登录态
     }
-    await resetSyncMeta()
+    // 不要在这里 resetSyncMeta：退出登录不代表放弃本地同步进度。
+    // 清空 sessionRev / pending 会让登出期间删除的会话在重新登录后被云端版本复活，
+    // 也会让导入备份的 origin 标记丢失（遇到墓碑时无法 revive）。
+    // 换账号时 finishAuth 会按 serverUrl + username 检测到差异并重置同步元数据。
     clearSyncCredentials()
     setSyncEnabled(false)
     setServerUrl(config.serverUrl)
