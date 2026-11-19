@@ -78,14 +78,24 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
-// handleState 返回当前游标，供客户端判断是否需要拉取。
+// handleState 返回当前游标与云端会话数，供客户端判断是否需要拉取、展示云端概览。
+// sessions 只统计未删除的会话（墓碑不计入）；它是新增字段，旧客户端会忽略。
 func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
-	rev, err := currentRev(r.Context(), s.db, userFrom(r))
+	userID := userFrom(r)
+	rev, err := currentRev(r.Context(), s.db, userID)
 	if err != nil {
 		writeError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"rev": rev})
+	var sessions int64
+	err = s.db.QueryRow(r.Context(),
+		`SELECT count(*) FROM sessions WHERE user_id = $1 AND deleted = FALSE`, userID,
+	).Scan(&sessions)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"rev": rev, "sessions": sessions})
 }
 
 type change struct {

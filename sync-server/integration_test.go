@@ -129,6 +129,22 @@ func TestSyncRoundTrip(t *testing.T) {
 		t.Fatalf("put session status=%d rev=%d", status, put.Rev)
 	}
 
+	// /api/state 同时返回游标与云端会话数，计数按账号隔离。
+	type stateResponse struct {
+		Rev      int64 `json:"rev"`
+		Sessions int64 `json:"sessions"`
+	}
+	var aliceState stateResponse
+	doJSON(t, ts, "GET", "/api/state", alice, nil, &aliceState)
+	if aliceState.Rev != put.Rev || aliceState.Sessions != 1 {
+		t.Fatalf("alice state = %+v, want rev=%d sessions=1", aliceState, put.Rev)
+	}
+	var bobState stateResponse
+	doJSON(t, ts, "GET", "/api/state", bob, nil, &bobState)
+	if bobState.Sessions != 0 {
+		t.Fatalf("bob state = %+v, want sessions=0", bobState)
+	}
+
 	// 拉取变更：alice 能看到，bob 看不到（用户隔离）。
 	var aliceChanges changesResponse
 	doJSON(t, ts, "GET", "/api/changes?since=0", alice, nil, &aliceChanges)
@@ -184,6 +200,12 @@ func TestSyncRoundTrip(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("delete tombstone missing: %+v", afterDelete.Sessions)
+	}
+	// 墓碑仍出现在变更列表里，但不计入 /api/state 的会话数。
+	var afterDeleteState stateResponse
+	doJSON(t, ts, "GET", "/api/state", alice, nil, &afterDeleteState)
+	if afterDeleteState.Sessions != 0 {
+		t.Fatalf("state after delete = %+v, want sessions=0", afterDeleteState)
 	}
 }
 

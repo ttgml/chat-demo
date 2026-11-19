@@ -37,10 +37,13 @@ const MODEL: ChatModel = 'deepseek-flash'
 /** 所有生成请求统一携带的助手身份说明 */
 const SYSTEM_PROMPT = '该助手为DeepSeek，由深度求索公司创造。'
 /** 云同步订阅：本地会话落盘、删除、全量替换后通知，供同步模块排队上传。 */
+/** 全量替换的来源：导入 ZIP 是恢复/覆盖，删除全部才是用户主动清空 */
+export type ReplaceReason = 'import' | 'clear'
+
 export type ChatChangeEvent =
   | { type: 'upsert'; id: string }
   | { type: 'delete'; id: string }
-  | { type: 'replace' }
+  | { type: 'replace'; reason: ReplaceReason }
 
 const chatChangeListeners = new Set<(event: ChatChangeEvent) => void>()
 
@@ -414,7 +417,10 @@ const waitForIdle = (sessionId?: string) =>
  * 替换历史对话：先写入暂存，成功后原子替换旧记录；写入为空即删除全部会话与附件。
  * 期间停止生成并禁止修改会话；失败时清除暂存，保留原有记录。
  */
-export const replaceHistory = async (write: () => Promise<void>): Promise<number> => {
+export const replaceHistory = async (
+  write: () => Promise<void>,
+  reason: ReplaceReason = 'clear'
+): Promise<number> => {
   if (get().importingHistory) {
     throw new Error('History replacement is already in progress')
   }
@@ -453,7 +459,7 @@ export const replaceHistory = async (write: () => Promise<void>): Promise<number
     })
     // 导入 ZIP / 删除全部属于全量替换：由同步模块做一次全量对账，
     // 把存活会话排队上传，并给已同步过但本地已消失的会话写墓碑。
-    emitChatChange({ type: 'replace' })
+    emitChatChange({ type: 'replace', reason })
     return summaries.length
   } finally {
     set({ importingHistory: false })

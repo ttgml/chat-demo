@@ -36,9 +36,12 @@ declare const styles: {
   readonly "syncForm": string;
   readonly "syncField": string;
   readonly "syncInput": string;
-  readonly "syncToggle": string;
+  readonly "syncStateInfo": string;
+  readonly "syncStateRow": string;
+  readonly "syncStateDot": string;
+  readonly "syncServerCount": string;
+  readonly "syncHint": string;
   readonly "syncActions": string;
-  readonly "syncWarning": string;
 };
 export = styles;
 

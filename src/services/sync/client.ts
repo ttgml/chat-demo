@@ -133,8 +133,14 @@ export const syncLogin = async (
 export const syncLogout = (signal?: AbortSignal): Promise<void> =>
   request('/api/logout', { method: 'POST' }, signal).then(() => undefined)
 
-export const syncState = (signal?: AbortSignal): Promise<{ rev: number }> =>
-  jsonRequest<{ rev: number }>('/api/state', {}, signal)
+export type SyncServerState = {
+  rev: number
+  /** 云端未删除的会话数；旧版服务端不返回此字段 */
+  sessions?: number
+}
+
+export const syncState = (signal?: AbortSignal): Promise<SyncServerState> =>
+  jsonRequest<SyncServerState>('/api/state', {}, signal)
 
 export const syncChanges = (since: number, limit = 200, signal?: AbortSignal) =>
   jsonRequest<SyncChanges>(

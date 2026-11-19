@@ -179,9 +179,11 @@ export const en = {
   latestReminderLanguage: 'English',
   settingsLocaleZhCN: 'Simplified Chinese',
   settingsLocaleEnUS: 'English',
-  syncEnableLabel: 'Enable cloud sync',
+  syncStatusLabel: 'Cloud sync',
   syncEnableDescription:
-    'Sync conversations across devices through a sync server. Local import and export are unaffected.',
+    'Signing in automatically syncs conversations across devices; signing out stops sync. Local import and export are unaffected.',
+  syncAccountLockedHint:
+    'To change the server or account, sign out first. Local conversations are kept and synced to the new account.',
   syncServerLabel: 'Sync server address',
   syncServerPlaceholder: 'https://sync.example.com',
   syncUsernameLabel: 'Username',
@@ -194,6 +196,8 @@ export const en = {
   syncLogout: 'Sign out',
   syncNow: 'Sync now',
   syncSyncing: 'Syncing...',
+  syncPause: 'Pause sync',
+  syncResume: 'Resume sync',
   syncServerInvalid: 'Enter a server address starting with http:// or https://',
   syncCredentialsRequired: 'Enter the server address, username and password',
   syncLoginFailed: 'Sign in failed: {message}',
@@ -201,6 +205,7 @@ export const en = {
   syncLoginSuccess: 'Signed in, cloud sync enabled',
   syncRegisterSuccess: 'Account created, cloud sync enabled',
   syncStatusDisabled: 'Disabled',
+  syncStatusPaused: 'Sync paused',
   syncStatusIdle: 'Synced',
   syncStatusSyncing: 'Syncing',
   syncStatusError: 'Sync failed',
@@ -208,7 +213,7 @@ export const en = {
   syncStatusNever: 'Never synced',
   syncStatusPending: '{count} changes waiting to upload',
   syncStatusLastAt: 'Last synced {time}',
-  syncWatchConnected: 'Live updates connected',
+  syncServerSessions: '{count} conversations on the server',
   syncWatchConnecting: 'Connecting live updates',
   syncWatchRetrying: 'Live updates reconnecting, timed sync still active',
   syncWatchUnsupported:
@@ -222,10 +227,4 @@ export const en = {
   syncErrorLocal: 'Local storage error, sync paused',
   syncErrorInvalidData: 'Corrupted cloud conversation skipped',
   syncConflictToast: '{count} conversations changed on another device, cloud versions applied',
-  syncAccountSwitchTitle: 'Switch sync account?',
-  syncAccountSwitchDescription:
-    'When you switch servers or accounts, conversations on this device are kept and uploaded to the new account. To use the new account data instead, back up and clear local conversations first.',
-  syncAccountSwitchConfirm: 'Switch',
-  syncHttpWarning:
-    'With an HTTP address, passwords and conversations travel in plaintext. Use only on a trusted local network.',
 } satisfies Record<keyof typeof zh, string>

@@ -78,6 +78,11 @@ export const clearPending = async (id: string): Promise<void> => {
   await (await getDB()).delete('pending', id)
 }
 
+/** 全量替换后丢弃过期的待上传变更，由调用方按替换后的本地列表重新排队 */
+export const clearAllPending = async (): Promise<void> => {
+  await (await getDB()).clear('pending')
+}
+
 /** 返回该附件上次上传成功时的 rev；-1 表示从未上传 */
 export const uploadedFileRev = async (id: string): Promise<number> =>
   (await (await getDB()).get('uploadedFiles', id)) ?? -1

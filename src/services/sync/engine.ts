@@ -1,5 +1,10 @@
 import * as db from '../chat/db.js'
-import { applyRemoteSummaries, onChatChange, useChatStore } from '../chat/store.js'
+import {
+  applyRemoteSummaries,
+  onChatChange,
+  useChatStore,
+  type ChatChangeEvent,
+} from '../chat/store.js'
 import type { Session } from '../chat/types.js'
 import { showToast } from '../../components/base/toastState.js'
 import { clearSyncCredentials, syncAccountKey, syncReady, useSyncConfig } from './config.js'
@@ -12,6 +17,7 @@ import {
   syncPutSession,
 } from './client.js'
 import {
+  clearAllPending,
   clearPending,
   commitSyncProgress,
   deleteSessionRev,
@@ -151,7 +157,11 @@ const pushOne = async (item: PendingItem): Promise<boolean> => {
 
   const session = await loadLocalSession(item.id)
   if (!session) {
-    // 本地已不存在（可能在排队期间被删除），转成墓碑
+    // 详情暂时读不到（全量替换事务未提交、缓存缺页）不等于会话被删除。
+    // 只有内存列表里也确实没有该会话时，才允许转成墓碑。
+    if (useChatStore.getState().sessions.some((summary) => summary.id === item.id)) {
+      return false
+    }
     await markPending({ id: item.id, kind: 'delete', updatedAt: item.updatedAt })
     return false
   }
@@ -309,17 +319,31 @@ const pull = async (): Promise<number> => {
 
 /**
  * 全量对账：首次启用、切换账号、导入或删除全部后调用。
- * 本地会话全部排队上传；已同步过但本地已消失的会话写墓碑。
+ *
+ * 导入 ZIP 是「用备份覆盖本地」，本地列表才是权威：旧队列里的删除意图已经过期，
+ * 且全量替换期间列表可能尚未稳定。此时若按 sessionRev 差集给云端写墓碑，
+ * 会把刚导入的会话在云端删掉，随后 pull 又把墓碑应用回本地，造成两端都丢数据。
+ * 因此导入场景传入 { resetPending: true, tombstones: false }。
  */
-const reconcile = async (): Promise<void> => {
+const reconcile = async (
+  options: { resetPending?: boolean; tombstones?: boolean } = {}
+): Promise<void> => {
+  const { resetPending = false, tombstones = true } = options
+  if (resetPending) {
+    await clearAllPending()
+  }
   const state = useChatStore.getState()
   const now = Date.now()
   for (const summary of state.sessions) {
     await markPending({ id: summary.id, kind: 'upsert', updatedAt: now })
   }
+  if (!tombstones) {
+    return
+  }
+  const localIds = new Set(state.sessions.map((summary) => summary.id))
   const known = await listSessionRevs()
   for (const id of known.keys()) {
-    if (!state.sessions.some((summary) => summary.id === id)) {
+    if (!localIds.has(id)) {
       await markPending({ id, kind: 'delete', updatedAt: now })
     }
   }
@@ -419,15 +443,16 @@ const scheduleWatchSync = () => {
  * 重新开启后这些改动仍要上传，否则关闭期间的编辑会永久丢失。
  * 只有真正发起网络请求时才检查 syncReady。
  */
-const handleChange = (event: { type: 'upsert' | 'delete' | 'replace'; id?: string }) => {
+const handleChange = (event: ChatChangeEvent) => {
   const config = useSyncConfig.getState()
   // 从未配置过同步账号时不记录，避免纯本地使用积累无意义队列
   if (!config.serverUrl || !config.username) {
     return
   }
   if (event.type === 'replace') {
+    const fromImport = event.reason === 'import'
     void enqueue(async () => {
-      await reconcile()
+      await reconcile(fromImport ? { resetPending: true, tombstones: false } : {})
       if (syncReady(useSyncConfig.getState())) {
         await syncOnce()
       }

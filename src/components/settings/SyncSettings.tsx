@@ -1,4 +1,5 @@
-import { useState } from 'react'
+import clsx from 'clsx'
+import { useEffect, useState } from 'react'
 import { useTranslate, isTranslationKey, type TranslationKey } from '../../i18n/index.js'
 import {
   applySyncAccount,
@@ -7,18 +8,17 @@ import {
   setSyncEnabled,
   useSyncConfig,
 } from '../../services/sync/config.js'
-import { syncLogin, syncLogout } from '../../services/sync/client.js'
+import { syncLogin, syncLogout, syncState } from '../../services/sync/client.js'
 import { resetSyncMeta } from '../../services/sync/meta.js'
 import { syncNow } from '../../services/sync/engine.js'
 import { useSyncStatus } from '../../services/sync/status.js'
 import { Button } from '../base/Button.js'
-import { Modal } from '../base/Modal.js'
 import { showToast } from '../base/toastState.js'
 import styles from './Settings.module.css'
 
 const validUrl = (value: string): boolean => /^https?:\/\/\S+$/i.test(value.trim())
 
-/** 云同步设置：服务地址 + 用户名密码登录/注册，开启后自动在设备间同步会话。 */
+/** 云同步设置：登录即开启同步，已登录时账号信息只读，状态与操作分开呈现。 */
 export const SyncSettings = () => {
   const t = useTranslate()
   const config = useSyncConfig()
@@ -28,14 +28,43 @@ export const SyncSettings = () => {
   const [password, setPassword] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const [pendingSwitch, setPendingSwitch] = useState<'login' | 'register' | null>(null)
+  const [serverSessions, setServerSessions] = useState<number | null>(null)
 
   const signedIn = config.token !== null
-  const switching =
-    signedIn &&
-    (normalizeServerUrl(serverUrl) !== config.serverUrl || username.trim() !== config.username)
-  // 已登录且未改动账号时不显示密码框；一旦改了地址/用户名，需要重新输密码才能切换。
-  const needsAuth = !signedIn || switching
+  // 已登录后账号信息以配置为准，输入框只读；更换账号必须先退出登录。
+  const displayServerUrl = signedIn ? config.serverUrl : serverUrl
+  const displayUsername = signedIn ? config.username : username
+  const needsAuth = !signedIn
+
+  // 登录时读取云端会话数，之后每次同步成功（lastSyncedAt 变化）刷新一次。
+  // 旧版服务端不返回 sessions、或请求失败时保持隐藏/沿用上次结果，不打扰用户。
+  useEffect(() => {
+    if (!signedIn) {
+      setServerSessions(null)
+      return
+    }
+    if (!config.enabled) {
+      return
+    }
+    const controller = new AbortController()
+    void syncState(controller.signal)
+      .then((state) => {
+        if (controller.signal.aborted) {
+          return
+        }
+        // 旧版服务端没有这个字段，此时隐藏而不是沿用其它账号的数字
+        setServerSessions(typeof state.sessions === 'number' ? state.sessions : null)
+      })
+      .catch(() => {})
+    return () => controller.abort()
+  }, [
+    signedIn,
+    config.enabled,
+    config.serverUrl,
+    config.username,
+    config.token,
+    status.lastSyncedAt,
+  ])
 
   const authenticate = async (mode: 'login' | 'register') => {
     const url = normalizeServerUrl(serverUrl)
@@ -46,10 +75,6 @@ export const SyncSettings = () => {
     const user = username.trim()
     if (!user || !password) {
       setError(t('syncCredentialsRequired'))
-      return
-    }
-    if (switching) {
-      setPendingSwitch(mode)
       return
     }
     await finishAuth(url, user, password, mode)
@@ -77,7 +102,6 @@ export const SyncSettings = () => {
       setError(t(mode === 'register' ? 'syncRegisterFailed' : 'syncLoginFailed', { message }))
     } finally {
       setBusy(false)
-      setPendingSwitch(null)
     }
   }
 
@@ -91,11 +115,16 @@ export const SyncSettings = () => {
     await resetSyncMeta()
     clearSyncCredentials()
     setSyncEnabled(false)
+    setServerUrl(config.serverUrl)
+    setUsername(config.username)
     setPassword('')
     setBusy(false)
   }
 
   const statusText = (): string => {
+    if (signedIn && !config.enabled) {
+      return t('syncStatusPaused')
+    }
     switch (status.phase) {
       case 'disabled':
         return t('syncStatusDisabled')
@@ -117,9 +146,7 @@ export const SyncSettings = () => {
     if (status.pending > 0) {
       parts.push(t('syncStatusPending', { count: status.pending }))
     }
-    if (status.watch === 'connected') {
-      parts.push(t('syncWatchConnected'))
-    } else if (status.watch === 'connecting') {
+    if (status.watch === 'connecting') {
       parts.push(t('syncWatchConnecting'))
     } else if (status.watch === 'unsupported') {
       parts.push(t('syncWatchUnsupported'))
@@ -129,23 +156,52 @@ export const SyncSettings = () => {
     return parts.join(' · ')
   }
 
+  /** 状态点的颜色：绿=正常同步，品牌色=同步中，红=需要关注，灰=未开启/已暂停 */
+  const stateTone = (): 'off' | 'ok' | 'busy' | 'error' => {
+    if (!signedIn || !config.enabled) {
+      return 'off'
+    }
+    switch (status.phase) {
+      case 'syncing':
+        return 'busy'
+      case 'error':
+      case 'authRequired':
+        return 'error'
+      default:
+        return 'ok'
+    }
+  }
+
   const errorKey: TranslationKey | null =
     status.errorKey && isTranslationKey(status.errorKey) ? status.errorKey : null
 
   return (
     <>
-      <div className={styles.cell}>
-        <div className={styles.label}>{t('syncEnableLabel')}</div>
-        <div className={styles.description}>{t('syncEnableDescription')}</div>
-        <label className={styles.syncToggle}>
-          <input
-            type="checkbox"
-            checked={config.enabled}
-            disabled={!signedIn || busy}
-            onChange={(event) => setSyncEnabled(event.target.checked)}
-          />
-          <span>{config.enabled ? t('syncStatusIdle') : t('syncStatusDisabled')}</span>
-        </label>
+      <div className={clsx(styles.cell, styles.row)}>
+        <div className={styles.syncStateInfo}>
+          <div className={styles.label}>{t('syncStatusLabel')}</div>
+          <div className={styles.description}>{t('syncEnableDescription')}</div>
+          <div className={styles.syncStateRow} role="status">
+            <span className={styles.syncStateDot} data-tone={stateTone()} />
+            <span>{statusText()}</span>
+          </div>
+          {serverSessions !== null ? (
+            <div className={styles.syncServerCount}>
+              {t('syncServerSessions', { count: serverSessions })}
+            </div>
+          ) : null}
+        </div>
+        {signedIn ? (
+          <Button
+            variant="outlined"
+            size="m"
+            className={styles.cellButton}
+            disabled={busy}
+            onClick={() => setSyncEnabled(!config.enabled)}
+          >
+            {config.enabled ? t('syncPause') : t('syncResume')}
+          </Button>
+        ) : null}
       </div>
 
       <div className={styles.cell}>
@@ -155,31 +211,28 @@ export const SyncSettings = () => {
             <input
               className={styles.syncInput}
               type="url"
-              value={serverUrl}
+              value={displayServerUrl}
               placeholder={t('syncServerPlaceholder')}
               autoComplete="off"
               spellCheck={false}
-              disabled={busy}
+              disabled={busy || signedIn}
               onChange={(event) => {
                 setServerUrl(event.target.value)
                 setError(null)
               }}
             />
           </label>
-          {serverUrl.trim().toLowerCase().startsWith('http://') ? (
-            <div className={styles.syncWarning}>{t('syncHttpWarning')}</div>
-          ) : null}
           <label className={styles.syncField}>
             <span>{t('syncUsernameLabel')}</span>
             <input
               className={styles.syncInput}
               type="text"
-              value={username}
+              value={displayUsername}
               placeholder={t('syncUsernamePlaceholder')}
               autoComplete="username"
               autoCapitalize="off"
               spellCheck={false}
-              disabled={busy}
+              disabled={busy || signedIn}
               onChange={(event) => {
                 setUsername(event.target.value)
                 setError(null)
@@ -208,90 +261,58 @@ export const SyncSettings = () => {
               />
             </label>
           ) : null}
+          {signedIn ? <div className={styles.syncHint}>{t('syncAccountLockedHint')}</div> : null}
           {error ? <div className={styles.error}>{error}</div> : null}
           {status.phase === 'error' && errorKey ? (
             <div className={styles.error}>{t(errorKey)}</div>
           ) : null}
-        </div>
-      </div>
-
-      <div className={styles.cell}>
-        <div className={styles.text}>
-          <div className={styles.label}>{t('settingDialogAsideSyncOptionLabel')}</div>
-          <div className={styles.description}>{statusText()}</div>
-        </div>
-        <div className={styles.syncActions}>
-          {needsAuth ? (
-            <>
+          <div className={styles.syncActions}>
+            {needsAuth ? (
+              <>
+                <Button
+                  variant="primary"
+                  size="m"
+                  className={styles.cellButton}
+                  disabled={busy}
+                  onClick={() => void authenticate('login')}
+                >
+                  {busy ? t('syncLoggingIn') : t('syncLogin')}
+                </Button>
+                <Button
+                  variant="outlined"
+                  size="m"
+                  className={styles.cellButton}
+                  disabled={busy}
+                  onClick={() => void authenticate('register')}
+                >
+                  {t('syncRegister')}
+                </Button>
+              </>
+            ) : (
               <Button
-                variant="primary"
+                variant="outlined"
                 size="m"
                 className={styles.cellButton}
-                disabled={busy}
-                onClick={() => void authenticate('login')}
+                disabled={busy || status.phase === 'syncing' || !config.enabled}
+                onClick={() => void syncNow()}
               >
-                {busy ? t('syncLoggingIn') : t('syncLogin')}
+                {status.phase === 'syncing' ? t('syncSyncing') : t('syncNow')}
               </Button>
+            )}
+            {signedIn ? (
               <Button
                 variant="outlined"
                 size="m"
                 className={styles.cellButton}
                 disabled={busy}
-                onClick={() => void authenticate('register')}
+                onClick={() => void logout()}
               >
-                {t('syncRegister')}
+                {t('syncLogout')}
               </Button>
-            </>
-          ) : (
-            <Button
-              variant="outlined"
-              size="m"
-              className={styles.cellButton}
-              disabled={busy || status.phase === 'syncing' || !config.enabled}
-              onClick={() => void syncNow()}
-            >
-              {status.phase === 'syncing' ? t('syncSyncing') : t('syncNow')}
-            </Button>
-          )}
-          {signedIn ? (
-            <Button
-              variant="outlined"
-              size="m"
-              className={styles.cellButton}
-              disabled={busy}
-              onClick={() => void logout()}
-            >
-              {t('syncLogout')}
-            </Button>
-          ) : null}
+            ) : null}
+          </div>
         </div>
       </div>
-
-      {pendingSwitch ? (
-        <Modal
-          title={t('syncAccountSwitchTitle')}
-          className={styles.deleteConfirm}
-          onClose={() => setPendingSwitch(null)}
-          footer={
-            <div className={styles.deleteActions}>
-              <Button variant="outlined" autoFocus onClick={() => setPendingSwitch(null)}>
-                {t('cancel')}
-              </Button>
-              <Button
-                variant="dangerOutlined"
-                onClick={() => {
-                  const mode = pendingSwitch
-                  void finishAuth(normalizeServerUrl(serverUrl), username.trim(), password, mode)
-                }}
-              >
-                {t('syncAccountSwitchConfirm')}
-              </Button>
-            </div>
-          }
-        >
-          {t('syncAccountSwitchDescription')}
-        </Modal>
-      ) : null}
     </>
   )
 }
