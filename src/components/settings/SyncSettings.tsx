@@ -132,7 +132,10 @@ export const SyncSettings = () => {
       case 'disabled':
         return t('syncStatusDisabled')
       case 'syncing':
-        return t('syncStatusSyncing')
+        // 首次同步上千条时会停留很久，直接显示队列规模，避免看起来「什么都没上传」。
+        return status.pending > 0
+          ? `${t('syncStatusSyncing')} · ${t('syncStatusPending', { count: status.pending })}`
+          : t('syncStatusSyncing')
       case 'error':
         return t('syncStatusError')
       case 'authRequired':
@@ -188,7 +191,7 @@ export const SyncSettings = () => {
             <span className={styles.syncStateDot} data-tone={stateTone()} />
             <span>{statusText()}</span>
           </div>
-          {serverSessions !== null ? (
+          {serverSessions !== null && status.lastSyncedAt > 0 && status.phase !== 'syncing' ? (
             <div className={styles.syncServerCount}>
               {t('syncServerSessions', { count: serverSessions })}
             </div>

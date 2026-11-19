@@ -76,6 +76,16 @@ export const markPending = async (item: PendingItem): Promise<void> => {
   await (await getDB()).put('pending', item, item.id)
 }
 
+/** 批量写入待上传变更；单事务保证整批要么全部入队，要么全部不生效。 */
+export const markPendingMany = async (items: readonly PendingItem[]): Promise<void> => {
+  if (items.length === 0) {
+    return
+  }
+  const tx = (await getDB()).transaction('pending', 'readwrite')
+  const store = tx.objectStore('pending')
+  await Promise.all([...items.map((item) => store.put(item, item.id)), tx.done])
+}
+
 export const clearPending = async (id: string): Promise<void> => {
   await (await getDB()).delete('pending', id)
 }

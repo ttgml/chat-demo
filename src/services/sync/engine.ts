@@ -15,6 +15,7 @@ import {
   syncGetSession,
   syncPutFile,
   syncPutSession,
+  syncState,
 } from './client.js'
 import {
   clearAllPending,
@@ -28,6 +29,7 @@ import {
   listSessionRevs,
   markFileUploaded,
   markPending,
+  markPendingMany,
   resetSyncMeta,
   setAccountKey,
   setSessionRev,
@@ -59,6 +61,8 @@ let started = false
 let stopped = false
 let watch: WatchController | null = null
 let watchTimer = 0
+/** 每次页面会话只做一次遗留漏同步修复，避免每轮同步都扫描全部会话。 */
+let backfilled = false
 
 const enqueue = (run: () => Promise<void>): Promise<void> => {
   const task = syncQueue.then(run)
@@ -463,23 +467,43 @@ const reconcile = async (
   }
   const state = useChatStore.getState()
   const now = Date.now()
-  for (const summary of state.sessions) {
-    await markPending({
-      id: summary.id,
-      kind: 'upsert',
-      updatedAt: now,
-      ...(origin ? { origin } : {}),
-    })
+  const items: PendingItem[] = state.sessions.map((summary) => ({
+    id: summary.id,
+    kind: 'upsert',
+    updatedAt: now,
+    ...(origin ? { origin } : {}),
+  }))
+  if (tombstones) {
+    const localIds = new Set(state.sessions.map((summary) => summary.id))
+    const known = await listSessionRevs()
+    for (const id of known.keys()) {
+      if (!localIds.has(id)) {
+        items.push({ id, kind: 'delete', updatedAt: now })
+      }
+    }
   }
-  if (!tombstones) {
+  // 单事务写入：首次登录上千条时旧实现要开上千个事务，既慢又容易被刷新页面打断。
+  await markPendingMany(items)
+}
+
+/**
+ * 补回“从未成功上传、也不在待上传队列”的本地会话。
+ * 用于修复旧版本在 reconcile 中途被刷新/关闭后留下的永久漏同步状态；
+ * 正常已同步的会话都有 sessionRev，不会重复入队。
+ */
+const backfillMissingSessions = async (): Promise<void> => {
+  const state = useChatStore.getState()
+  if (state.sessions.length === 0) {
     return
   }
-  const localIds = new Set(state.sessions.map((summary) => summary.id))
   const known = await listSessionRevs()
-  for (const id of known.keys()) {
-    if (!localIds.has(id)) {
-      await markPending({ id, kind: 'delete', updatedAt: now })
-    }
+  const pending = new Set((await listPending()).map((item) => item.id))
+  const now = Date.now()
+  const items: PendingItem[] = state.sessions
+    .filter((summary) => !known.has(summary.id) && !pending.has(summary.id))
+    .map((summary) => ({ id: summary.id, kind: 'upsert', updatedAt: now }))
+  if (items.length > 0) {
+    await markPendingMany(items)
   }
 }
 
@@ -498,6 +522,17 @@ const showSyncUnavailable = (resetPending: boolean) => {
   })
 }
 
+/**
+ * 首次登录、切换账号，或发现服务端数据被重置：清空旧进度并按本地现存会话重建上传队列。
+ * accountKey 必须最后写入：reconcile 可能要给上千个会话排队，若中途刷新页面/关闭标签页，
+ * 账号标识已存在但队列只写了一半，后续同步不会再补，本地会话会永久漏传。
+ */
+const resetAccountProgress = async (key: string): Promise<void> => {
+  await resetSyncMeta()
+  await reconcile()
+  await setAccountKey(key)
+}
+
 /** 一次完整同步：先推送本地变更，再拉取远端变更 */
 const syncOnce = async (): Promise<void> => {
   if (stopped || !syncReady(useSyncConfig.getState())) {
@@ -512,11 +547,25 @@ const syncOnce = async (): Promise<void> => {
   setSyncStatus({ phase: 'syncing', errorKey: null })
   try {
     const key = syncAccountKey(useSyncConfig.getState())
+    const localRev = await getLastSyncedRev()
     if ((await getAccountKey()) !== key) {
-      await resetSyncMeta()
-      await setAccountKey(key)
-      await reconcile()
+      await resetAccountProgress(key)
+    } else if (localRev > 0) {
+      // user_rev 按账号单调递增，不可能回退。比本地游标小只可能是服务端换了数据库、
+      // 重建了账号，或清空了同步数据；此时旧游标与 sessionRev 全部失效，必须重新对账，
+      // 否则本地会话永远不会上传（syncOnce 只看 pending，pull 也会从过大的 since 开始）。
+      const remote = await syncState()
+      if (remote.rev < localRev) {
+        await resetAccountProgress(key)
+      }
     }
+    if (!backfilled) {
+      // 修复旧版本在全量对账中途被刷新后留下的「本地有会话但不在队列」状态。
+      await backfillMissingSessions()
+      backfilled = true
+    }
+    // 先把队列规模反映到设置页，避免首次上传上千条时一直显示「已同步 / 0 组对话」。
+    await updatePendingCount()
     const pushConflicts = await push()
     const pullResult = await pull()
     let conflicts = pushConflicts + pullResult.overwritten
@@ -547,11 +596,10 @@ const syncOnce = async (): Promise<void> => {
   }
 }
 
-const updatePendingCount = () => {
-  void listPending()
+const updatePendingCount = () =>
+  listPending()
     .then((items) => setSyncStatus({ pending: items.length }))
     .catch(() => {})
-}
 
 const scheduleRetry = () => {
   if (stopped || retryTimer) {
