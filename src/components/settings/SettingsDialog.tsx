@@ -23,6 +23,8 @@ import {
   isChineseBrowser,
   setLocale,
   setLocation,
+  setReasoningEffort,
+  setSafetyLevel,
   setThemePreference,
   setTtsVoice,
   useSettings,
@@ -106,6 +108,8 @@ const SettingsContent = () => {
               <ThemeSetting />
               <LocaleSetting />
               <TtsVoiceSetting />
+              <ReasoningEffortSetting />
+              <SafetyLevelSetting />
               <LocationSetting />
             </>
           ) : section === 'sync' ? (
@@ -212,6 +216,53 @@ const useHistoryDelete = () => {
     },
     confirm,
   }
+}
+
+/** 推理强度：low / high / max，与服务端默认一致时默认为 high */
+const ReasoningEffortSetting = () => {
+  const t = useTranslate()
+  const reasoningEffort = useSettings((state) => state.reasoningEffort)
+  return (
+    <SettingCell
+      label={t('settingsReasoningEffort')}
+      status={null}
+      action={
+        <Select
+          ariaLabel={t('settingsReasoningEffort')}
+          value={reasoningEffort}
+          options={[
+            { value: 'low', label: t('settingsReasoningEffortLow') },
+            { value: 'high', label: t('settingsReasoningEffortHigh') },
+            { value: 'max', label: t('settingsReasoningEffortMax') },
+          ]}
+          onChange={setReasoningEffort}
+        />
+      }
+    />
+  )
+}
+
+/** 内容安全：high 开启基础风控，low 为服务端默认检查 */
+const SafetyLevelSetting = () => {
+  const t = useTranslate()
+  const safetyLevel = useSettings((state) => state.safetyLevel)
+  return (
+    <SettingCell
+      label={t('settingsSafetyLevel')}
+      status={null}
+      action={
+        <Select
+          ariaLabel={t('settingsSafetyLevel')}
+          value={safetyLevel}
+          options={[
+            { value: 'high', label: t('settingsSafetyLevelHigh') },
+            { value: 'low', label: t('settingsSafetyLevelLow') },
+          ]}
+          onChange={setSafetyLevel}
+        />
+      }
+    />
+  )
 }
 
 const LocationSetting = () => {

@@ -6,6 +6,15 @@
 
 export type ChatModel = 'deepseek-flash' | 'deepseek-v4-pro'
 
+/**
+ * 思考强度（output_config.effort）：low / high / max 均开启思考，仅强度不同。
+ * 不传时服务端默认按 high 处理。
+ */
+export type ReasoningEffort = 'low' | 'high' | 'max'
+
+/** 内容安全（safety_check.level）：high 开启基础风控，low 与不传相同。 */
+export type SafetyCheckLevel = 'low' | 'high'
+
 // ---------- 响应：内容块 ----------
 
 /** 正文引用：服务端把模型的引用标记还原为来源，挂在对应文本块上 */
@@ -177,8 +186,10 @@ export type CreateMessageRequest = {
   system: string
   messages: MessageParam[]
   thinking: { type: 'enabled' | 'disabled' }
+  /** 思考强度；显式设置了 thinking.type 时它只决定强度，不改变是否开启思考 */
+  output_config: { effort: ReasoningEffort }
   tools: (DeepseekWebSearchTool | DeepseekReadUrlTool)[]
-  safety_check: { level: 'high' }
+  safety_check: { level: SafetyCheckLevel }
   title?: { enabled: boolean }
 }
 
