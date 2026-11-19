@@ -67,11 +67,11 @@ export const estimateTextTokens = (text: string): number => {
 
 const fileTokens = (isImage: boolean) => (isImage ? IMAGE_TOKENS : DOCUMENT_TOKENS)
 
-/** 提问只计算真正会带上的附件：没有 serverId 的附件不会进入请求 */
+/** 提问只计算真正会带上的附件：没有 serverId 或已被移出上下文的附件不会进入请求 */
 const estimateUser = ({ content, files }: UserMessage): number => {
   let tokens = estimateTextTokens(content)
   for (const file of files) {
-    if (file.serverId) {
+    if (file.serverId && !file.omitted) {
       tokens += fileTokens(file.isImage)
     }
   }

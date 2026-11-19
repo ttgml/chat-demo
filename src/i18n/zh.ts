@@ -96,6 +96,16 @@ export const zh = {
   replyInvalidApiKey: 'API Key 无效或已被删除，请更换后重试',
   replyInsufficientBalance: '账户余额不足，请充值后重试',
   replyRateLimited: '请求过于频繁，请稍后再试',
+  replyUnusableFiles:
+    '对话中的附件无法被模型处理（{names}），重试也无法成功。可以把它们从上下文中移除后重新生成，原始文件仍会保留。',
+  replyRemoveUnusableFiles: '移除并重试',
+  removeUnusableFilesModalTitle: '移除后重新生成这条回答',
+  removeUnusableFilesModalDescription:
+    '以下附件无法被模型处理，将从这次对话的上下文中移除（不会删除本地文件）。移除后会自动重新生成这条回答。',
+  removeFilesConfirm: '移除并重试',
+  omittedFileBadge: '已移出上下文',
+  omittedFileRestore: '恢复到上下文',
+  omittedFilesUserMessage: '（原消息中的附件已从上下文移除）',
   completionServerBusyToast: '服务器繁忙，请稍后再试',
   unknownError: '未知错误',
   replyRefused: '你好，这个问题我暂时无法回答，让我们换个话题再聊聊吧。',

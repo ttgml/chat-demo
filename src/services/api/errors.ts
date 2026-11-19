@@ -57,6 +57,31 @@ export const isRetryableApiError = (error: unknown): boolean => {
 /** 服务端判定附件失效的情况：本地有原件时重新上传即可自愈 */
 export type FileErrorCode = 'fileIdMissing' | 'fileDataMissing' | 'invalidFileId'
 
+/**
+ * 400 报文里指出的消息内容坐标，例如 `messages.3.content.0`（也兼容 `messages[3].content[0]`）。
+ * 下标对应请求体里的 messages 数组与 content 数组。
+ */
+export type ContentPosition = { message: number; content: number }
+
+const CONTENT_POSITION = /messages(?:\.(\d+)|\[(\d+)\])\.content(?:\.(\d+)|\[(\d+)\])/
+
+/**
+ * 从 400 报文里取出出错的 content 坐标。
+ * 只返回坐标，不判断那个块是不是附件；调用方拿到坐标后用自己构建请求时的映射表判定。
+ */
+export const getContentPosition = (error: unknown): ContentPosition | null => {
+  if (!(error instanceof ApiError) || error.status !== 400) {
+    return null
+  }
+  const match = CONTENT_POSITION.exec(error.message)
+  if (!match) {
+    return null
+  }
+  const message = Number(match[1] ?? match[2])
+  const content = Number(match[3] ?? match[4])
+  return Number.isInteger(message) && Number.isInteger(content) ? { message, content } : null
+}
+
 /** 400 只带 message 文本，按文案前缀区分；顺序无关，互不重叠 */
 const FILE_ERROR_PATTERNS: ReadonlyArray<readonly [FileErrorCode, RegExp]> = [
   ['fileIdMissing', /file_ids do not exist or are not created under your account/i],

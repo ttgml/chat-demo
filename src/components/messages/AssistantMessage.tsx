@@ -1,15 +1,16 @@
 import { useTranslate } from '../../i18n/index.js'
 import clsx from 'clsx'
-import { memo } from 'react'
+import { memo, useState } from 'react'
 import { IconRefreshOutline16, IconWarningOutline16 } from '../base/icons.js'
 import { describeReply } from '../../services/chat/describe.js'
 import { canContinueReply } from '../../services/chat/reply.js'
-import { continueReply, regenerateReply } from '../../services/chat/store.js'
+import { continueReply, omitUnusableFiles, regenerateReply } from '../../services/chat/store.js'
 import { stopReadAloud } from '../../services/speech/readAloud.js'
 import type { AssistantMessage as AssistantMessageType } from '../../services/chat/types.js'
 import { openSettings } from '../settings/settingsDialogState.js'
 import { IconButton } from '../base/IconButton.js'
 import { Button } from '../base/Button.js'
+import { Modal } from '../base/Modal.js'
 import { Markdown } from '../markdown/Markdown.js'
 import { SiteThumbnails } from '../search/SiteLogo.js'
 import { toggleSearchPanel, useSearchPanel } from '../search/searchPanelState.js'
@@ -56,6 +57,8 @@ export const AssistantMessage = memo(function AssistantMessage({
     .join('\n\n')
   const copyText = responseText || notice?.text
   const waiting = streaming && view.steps.length === 0 && !view.answer && !message.thinking
+  const [omitOpen, setOmitOpen] = useState(false)
+  const fileIssue = message.status === 'error' ? message.error?.fileIssue : undefined
   const summaryEntry = `${message.id}-summary`
   return (
     <div className={styles.message}>
@@ -122,8 +125,51 @@ export const AssistantMessage = memo(function AssistantMessage({
                 </a>
               </>
             ) : null}
+            {notice.action === 'omitFiles' ? (
+              <>
+                {' '}
+                <button
+                  type="button"
+                  className={styles.noticeAction}
+                  onClick={() => setOmitOpen(true)}
+                >
+                  {t('replyRemoveUnusableFiles')}
+                </button>
+              </>
+            ) : null}
           </span>
         </div>
+      ) : null}
+      {omitOpen && fileIssue ? (
+        <Modal
+          title={t('removeUnusableFilesModalTitle')}
+          onClose={() => setOmitOpen(false)}
+          footer={
+            <>
+              <Button variant="outlined" autoFocus onClick={() => setOmitOpen(false)}>
+                {t('cancel')}
+              </Button>
+              <Button
+                variant="danger"
+                disabled={busy}
+                onClick={() => {
+                  stopReadAloud()
+                  omitUnusableFiles(sessionId, message.id)
+                  setOmitOpen(false)
+                }}
+              >
+                {t('removeFilesConfirm')}
+              </Button>
+            </>
+          }
+        >
+          <div className={styles.omitDescription}>{t('removeUnusableFilesModalDescription')}</div>
+          <ul className={styles.fileIssueList}>
+            {fileIssue.names.map((name) => (
+              <li key={name}>{name}</li>
+            ))}
+          </ul>
+        </Modal>
       ) : null}
       {!streaming && !refused && view.searchResults.length > 0 ? (
         <div

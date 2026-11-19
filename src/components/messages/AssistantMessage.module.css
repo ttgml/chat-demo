@@ -67,6 +67,25 @@
   }
 }
 
+.omitDescription {
+  color: var(--dsw-alias-label-secondary);
+}
+
+.fileIssueList {
+  margin: 12px 0 0;
+  padding: 10px 12px 10px 28px;
+  border-radius: 12px;
+  background-color: var(--dsw-alias-interactive-bg-hover);
+  font-size: 13px;
+  line-height: 20px;
+  color: var(--dsw-alias-label-primary);
+  overflow-wrap: anywhere;
+
+  > li + li {
+    margin-top: 4px;
+  }
+}
+
 .noticeAction {
   padding: 0;
   border: none;

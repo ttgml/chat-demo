@@ -113,3 +113,36 @@ button.image {
     transform: rotate(360deg);
   }
 }
+
+/* 已从上下文移除的附件：原件照常展示，整块淡出并在底部给出可点击的标记 */
+.omitted {
+  opacity: 0.55;
+}
+
+.omittedWrap {
+  position: relative;
+  display: inline-flex;
+}
+
+.omittedBadge {
+  position: absolute;
+  right: 4px;
+  bottom: 4px;
+  left: 4px;
+  padding: 2px 6px;
+  overflow: hidden;
+  border: none;
+  border-radius: 6px;
+  background-color: rgba(0, 0, 0, 0.62);
+  font: inherit;
+  font-size: 11px;
+  line-height: 16px;
+  color: #fff;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  cursor: pointer;
+
+  &:hover {
+    background-color: rgba(0, 0, 0, 0.78);
+  }
+}

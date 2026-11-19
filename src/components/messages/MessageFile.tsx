@@ -2,6 +2,7 @@ import clsx from 'clsx'
 import { useEffect, useState } from 'react'
 import { useTranslate } from '../../i18n/index.js'
 import { useUploads } from '../../services/attachments.js'
+import { restoreFile } from '../../services/chat/store.js'
 import { loadFile } from '../../services/chat/db.js'
 import type { FileAttachment } from '../../services/chat/types.js'
 import { IconPhotoErrorFill20, IconRefreshOutline16 } from '../base/icons.js'
@@ -31,10 +32,10 @@ const useFileUrl = (id: string) => {
   return fileUrl?.id === id ? fileUrl.url : undefined
 }
 
-/** 历史或失效附件的补传状态：只在还没有 serverId 时显示 */
+/** 历史或失效附件的补传状态：只在还没有 serverId 时显示；已移出上下文的附件不再补传 */
 const useUploadState = (file: FileAttachment) =>
   useUploads((state) => {
-    if (file.serverId) {
+    if (file.serverId || file.omitted) {
       return null
     }
     const task = state.tasks[file.id]
@@ -48,11 +49,40 @@ const useUploadState = (file: FileAttachment) =>
  * - 文件：显示文件卡片。
  */
 export const MessageFile = ({
+  sessionId,
+  file,
+  onRetry,
+}: {
+  sessionId: string
+  file: FileAttachment
+  /** 本条消息补传失败且可重试时提供 */
+  onRetry: (() => void) | null
+}) => {
+  const t = useTranslate()
+  if (!file.omitted) {
+    return <MessageFileContent file={file} onRetry={onRetry} />
+  }
+  // 已从上下文移除：原件照常展示，加一层淡出 + 可点击恢复的标记
+  return (
+    <div className={clsx(styles.omitted, styles.omittedWrap)}>
+      <MessageFileContent file={file} onRetry={null} />
+      <button
+        type="button"
+        className={styles.omittedBadge}
+        title={t('omittedFileRestore')}
+        onClick={() => restoreFile(sessionId, file.id)}
+      >
+        {t('omittedFileBadge')}
+      </button>
+    </div>
+  )
+}
+
+const MessageFileContent = ({
   file,
   onRetry,
 }: {
   file: FileAttachment
-  /** 本条消息补传失败且可重试时提供 */
   onRetry: (() => void) | null
 }) => {
   const t = useTranslate()

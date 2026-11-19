@@ -1,8 +1,14 @@
 import { create } from 'zustand'
+import { translate } from '../../i18n/index.js'
 import { createId } from '../../utils/id.js'
 import { ApiError, streamMessage } from '../api/client.js'
 import type { ChatModel, CreateMessageRequest } from '../api/types.js'
-import { extractFileIds, getFileErrorCode, isRetryableApiError } from '../api/errors.js'
+import {
+  extractFileIds,
+  getContentPosition,
+  getFileErrorCode,
+  isRetryableApiError,
+} from '../api/errors.js'
 import { cancelUpload, describeUploadError, uploadAttachment, useUploads } from '../attachments.js'
 import { useSettings } from '../settings.js'
 import { appendBranch, getVisibleMessages, normalizeSession, selectVersion } from './branches.js'
@@ -22,6 +28,7 @@ import {
   settleReply,
   SYSTEM_PROMPT,
   toRequestMessages,
+  type RequestMessages,
 } from './reply.js'
 import {
   isPinned,
@@ -758,6 +765,88 @@ export const regenerateReply = (sessionId: string, messageId?: string) => {
   void streamReply(sessionId, reply, { history, question })
 }
 
+/**
+ * 把无法处理的附件从上下文排除（只打标记，原件与 file_id 都保留），然后重新生成。
+ * 服务端 400 会指出是哪一条消息的哪个附件；同一 file_id 可能被多条消息共用，
+ * 所以按本地附件 id 把所有引用一起标记，否则重试时仍会碰到同一份文件。
+ */
+export const omitUnusableFiles = (sessionId: string, messageId: string): boolean => {
+  if (get().importingHistory || deletingSessions.has(sessionId) || getStreamController(sessionId)) {
+    return false
+  }
+  const session = getSession(sessionId)
+  const failed = session?.messages.find((message) => message.id === messageId)
+  const ids = failed?.role === 'assistant' ? failed.error?.fileIssue?.ids : undefined
+  if (!ids?.length) {
+    return false
+  }
+  const targets = new Set(ids)
+  updateSession(sessionId, (current) => ({
+    ...current,
+    updatedAt: Date.now(),
+    messages: current.messages.map((message) => {
+      if (message.role !== 'user') {
+        return message
+      }
+      let changed = false
+      const files = message.files.map((file) => {
+        if (!targets.has(file.id) || file.omitted) {
+          return file
+        }
+        changed = true
+        return { ...file, omitted: true as const }
+      })
+      if (!changed) {
+        return message
+      }
+      // 排除后这条提问可能什么都不剩，补一句占位，否则请求会因为空 content 被拒
+      const usable = files.some((file) => !file.omitted)
+      const content =
+        !message.content.trim() && !usable ? translate('omittedFilesUserMessage') : message.content
+      return { ...message, files, content }
+    }),
+  }))
+  persist(sessionId)
+  regenerateReply(sessionId, messageId)
+  return true
+}
+
+/** 把误判或想重新尝试的附件恢复到上下文；失败的回答需要重新生成。 */
+export const restoreFile = (sessionId: string, fileId: string) => {
+  if (get().importingHistory || deletingSessions.has(sessionId) || getStreamController(sessionId)) {
+    return false
+  }
+  const session = getSession(sessionId)
+  const omitted = (message: Message) =>
+    message.role === 'user' && message.files.some((file) => file.id === fileId && file.omitted)
+  if (!session?.messages.some(omitted)) {
+    return false
+  }
+  updateSession(sessionId, (current) => ({
+    ...current,
+    updatedAt: Date.now(),
+    messages: current.messages.map((message) => {
+      if (!omitted(message)) {
+        return message
+      }
+      return {
+        ...message,
+        files: (message as UserMessage).files.map((file) => {
+          if (file.id !== fileId || !file.omitted) {
+            return file
+          }
+          // 去掉 omitted 标记；展开后显式删除，避免留下 false 之类的多余字段
+          const restored: FileAttachment = { ...file }
+          delete restored.omitted
+          return restored
+        }),
+      }
+    }),
+  }))
+  persist(sessionId)
+  return true
+}
+
 /** 编辑提问后新增同父版本，保留原文件；旧问题的所有回答与后续对话仍可切回。 */
 export const editMessage = (sessionId: string, messageId: string, content: string): boolean => {
   if (get().importingHistory || deletingSessions.has(sessionId)) {
@@ -942,12 +1031,14 @@ const prepareFiles = async (sessionId: string, request: Request, signal: AbortSi
     signal.addEventListener('abort', () => reject(signal.reason), { once: true })
   })
   const uploads = Promise.allSettled(
-    request.question.files.map(async (file) => {
-      const serverId = await ensureServerId(apiKey, file)
-      if (serverId) {
-        serverIds.set(file.id, serverId)
-      }
-    })
+    request.question.files
+      .filter((file) => !file.omitted)
+      .map(async (file) => {
+        const serverId = await ensureServerId(apiKey, file)
+        if (serverId) {
+          serverIds.set(file.id, serverId)
+        }
+      })
   )
   void uploads.then(() => {
     if (epoch === historyEpoch) {
@@ -963,7 +1054,7 @@ const prepareFiles = async (sessionId: string, request: Request, signal: AbortSi
   const pending = new Map<string, FileAttachment>()
   for (const [user] of getContextRounds(request.history).toReversed()) {
     for (const file of user.files) {
-      if (!file.serverId && !serverIds.has(file.id) && !pending.has(file.id)) {
+      if (!file.omitted && !file.serverId && !serverIds.has(file.id) && !pending.has(file.id)) {
         pending.set(file.id, file)
       }
     }
@@ -997,7 +1088,7 @@ const collectServerFileIds = (request: Request): Set<string> => {
   const ids = new Set<string>()
   const add = (files: FileAttachment[]) => {
     for (const file of files) {
-      if (file.serverId) {
+      if (file.serverId && !file.omitted) {
         ids.add(file.serverId)
       }
     }
@@ -1035,7 +1126,7 @@ const reuploadInvalidatedFiles = (sessionId: string, request: Request, error: un
     }
     let changed = false
     const files = message.files.map((file) => {
-      if (!file.serverId || !targets.has(file.serverId)) {
+      if (!file.serverId || file.omitted || !targets.has(file.serverId)) {
         return file
       }
       localIds.push(file.id)
@@ -1072,6 +1163,43 @@ const waitForRetry = (attempt: number, signal: AbortSignal) =>
   })
 
 /**
+ * 服务端返回 400 并指出 `messages.N.content.M` 无法处理时，找到它指向的附件。
+ * contentFiles 里存的是 file_id（serverId），而同一份附件可能被多条消息共用，
+ * 所以按 serverId 把会话里所有引用都收集起来，只改一处会重试仍失败。
+ */
+const resolveFileIssue = (
+  sessionId: string,
+  built: RequestMessages | null,
+  error: unknown
+): { ids: string[]; names: string[] } | null => {
+  const position = getContentPosition(error)
+  const session = getSession(sessionId)
+  if (!built || !position || !session) {
+    return null
+  }
+  const fileId = built.contentFiles.get(position.message)?.[position.content]
+  // 坐标指向的不是附件块（如文本），不提供移除入口
+  if (!fileId) {
+    return null
+  }
+  const ids = new Set<string>()
+  const names = new Set<string>()
+  for (const message of session.messages) {
+    if (message.role !== 'user') {
+      continue
+    }
+    for (const file of message.files) {
+      if (file.serverId !== fileId) {
+        continue
+      }
+      ids.add(file.id)
+      names.add(file.name)
+    }
+  }
+  return ids.size > 0 ? { ids: [...ids], names: [...names] } : null
+}
+
+/**
  * 请求并消费流：先补齐附件的 serverId，再发请求；流式增量按动画帧刷新内存，完成、失败或停止后落盘。
  * 补传失败时回复记为 upload 错误，可重试。
  * 服务端判定 file_id 失效时重新补传后重发，退避重试且次数有上限，超过则按原始报错收尾。
@@ -1096,6 +1224,8 @@ const streamReply = async (sessionId: string, initial: AssistantMessage, request
       /** 附件补齐前出错属于上传失败，请求还没有发出 */
       let preparing = true
       let receivedContent = false
+      /** 本次请求的构建结果：报错时用它把服务端的 content 坐标映射回本地附件 */
+      let built: RequestMessages | null = null
       try {
         const prepared = await prepareFiles(sessionId, request, controller.signal)
         preparing = false
@@ -1106,7 +1236,7 @@ const streamReply = async (sessionId: string, initial: AssistantMessage, request
         reply = { ...reply, latestReminder }
         updateReply(sessionId, reply)
         persist(sessionId)
-        const messages = toRequestMessages(
+        built = toRequestMessages(
           prepared.history,
           prepared.question,
           prepared.prefix,
@@ -1119,7 +1249,7 @@ const streamReply = async (sessionId: string, initial: AssistantMessage, request
           {
             model: initial.model ?? MODEL,
             system: SYSTEM_PROMPT,
-            messages,
+            messages: built.messages,
             thinking: { type: initial.thinking ? 'enabled' : 'disabled' },
             // 思考强度与内容安全等级跟随通用设置；未设置时沿用服务端默认 high
             output_config: { effort: settings.reasoningEffort },
@@ -1184,11 +1314,13 @@ const streamReply = async (sessionId: string, initial: AssistantMessage, request
           // 已收到 message_delta 的结束原因，只是缺了结尾的 message_stop
           reply = settleReply(reply, 'done', Date.now())
         } else if (error instanceof ApiError) {
+          const fileIssue = resolveFileIssue(sessionId, built, error)
           reply = settleReply(reply, 'error', Date.now(), {
             kind: error.kind,
             message: error.message,
             status: error.status,
             localMessage: error.localMessage,
+            ...(fileIssue ? { fileIssue } : {}),
           })
         } else {
           reply = settleReply(reply, 'error', Date.now(), {

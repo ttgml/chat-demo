@@ -23,6 +23,11 @@ export type FileAttachment = {
   isImage: boolean
   /** 具体 MIME；导入时没有原件或无法识别的为空字符串，不影响图片身份。 */
   mimeType: string
+  /**
+   * 服务端判定这份附件无法处理（尺寸超限、格式不支持等）后由用户确认排除；
+   * 只影响是否进入请求上下文，原件与 serverId 都保留，可以随时恢复。
+   */
+  omitted?: true
 }
 
 /** 本地消息的分支关系；字段缺省时按线性消息列表处理。 */
@@ -100,6 +105,11 @@ export type AssistantMessage = MessageBranch & {
     localMessage?: TranslationMessage
     /** 仅 upload：重新上传是否可能成功（网络、限流、服务端繁忙）；过大、格式不支持为 false */
     retryable?: boolean
+    /**
+     * 服务端指出上下文里某个附件无法处理（如 400 invalid_request_error + messages.N.content.M）。
+     * ids 是会话里引用同一附件的本地 id（同一 file_id 可能被多条消息共用），names 用于确认弹窗。
+     */
+    fileIssue?: { ids: string[]; names: string[] }
   }
 }
 

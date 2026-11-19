@@ -21,10 +21,11 @@ export const SYSTEM_PROMPT = '该助手为DeepSeek，由深度求索公司创造
 /**
  * 文件按 Files API 的 file_id（附件的 serverId）引用：图片用 image 块，其余用 document 块。
  * 发送前 streamReply 会先补齐 serverId；仍为 null 的是本地没有原件的附件，不进入请求。
+ * 被用户从上下文移除（omitted）的附件即使有 serverId 也不再发送。
  */
 const toFileBlocks = (files: FileAttachment[]): FileBlockParam[] =>
-  files.flatMap(({ serverId, isImage }) =>
-    serverId
+  files.flatMap(({ serverId, isImage, omitted }) =>
+    serverId && !omitted
       ? [
           {
             type: isImage ? 'image' : 'document',
@@ -188,8 +189,7 @@ export const canContinueReply = (reply: AssistantMessage): boolean => {
     return false
   }
   return (
-    reply.status === 'stopped' ||
-    (reply.status === 'done' && reply.stopReason === 'max_tokens')
+    reply.status === 'stopped' || (reply.status === 'done' && reply.stopReason === 'max_tokens')
   )
 }
 
@@ -299,17 +299,21 @@ export const getContextRounds = (history: Message[]): [UserMessage, AssistantMes
   return rounds
 }
 
-/**
- * 历史中进入请求的部分：只保留「提问 + 有回答的回复」成对的轮次，并按请求格式转换。
- * 失败或没有回答的轮次不进上下文；末尾未成对的提问与生成中的回复由调用方补上。
- */
-export const toContextMessages = (history: Message[]): MessageParam[] => {
+/** 请求 messages 与它们的来源消息：latest_reminder 不对应本地消息 */
+type ContextBuild = { messages: MessageParam[]; messageIds: (string | null)[] }
+
+const buildContextMessages = (history: Message[]): ContextBuild => {
   const messages: MessageParam[] = []
+  const messageIds: (string | null)[] = []
+  const push = (message: MessageParam, id: string | null) => {
+    messages.push(message)
+    messageIds.push(id)
+  }
   let previousReminder: string | undefined
   const appendReminder = (reminder: string | undefined) => {
     // 仅在当前分支首次出现或内容变化时插入快照；缺少快照的消息保持原有内容。
     if (reminder && reminder !== previousReminder) {
-      messages.push({ role: 'latest_reminder', content: reminder })
+      push({ role: 'latest_reminder', content: reminder }, null)
       previousReminder = reminder
     }
   }
@@ -319,13 +323,50 @@ export const toContextMessages = (history: Message[]): MessageParam[] => {
       continue
     }
     appendReminder(reply.latestReminder)
-    messages.push(toUserParam(user), toAssistantParam(reply))
+    push(toUserParam(user), user.id)
+    push(toAssistantParam(reply), reply.id)
   }
-  return messages
+  return { messages, messageIds }
+}
+
+/**
+ * 历史中进入请求的部分：只保留「提问 + 有回答的回复」成对的轮次，并按请求格式转换。
+ * 失败或没有回答的轮次不进上下文；末尾未成对的提问与生成中的回复由调用方补上。
+ */
+export const toContextMessages = (history: Message[]): MessageParam[] =>
+  buildContextMessages(history).messages
+
+/**
+ * content 块到附件 file_id 的映射：下标与 `MessageParam.content` 一致，非附件块为 null。
+ * 请求出错时服务端会回 `messages.N.content.M`，靠这张表才能找到到底是哪个附件。
+ */
+const collectContentFiles = (messages: MessageParam[]): Map<number, (string | null)[]> => {
+  const files = new Map<number, (string | null)[]>()
+  messages.forEach((message, index) => {
+    if (message.role === 'latest_reminder' || typeof message.content === 'string') {
+      return
+    }
+    files.set(
+      index,
+      message.content.map((block) =>
+        block.type === 'image' || block.type === 'document' ? block.source.file_id : null
+      )
+    )
+  })
+  return files
+}
+
+export type RequestMessages = {
+  messages: MessageParam[]
+  /** messages[i] 对应的本地消息 id；latest_reminder 没有对应消息 */
+  messageIds: (string | null)[]
+  /** messages[i] 的 content 块对应的附件 file_id，见 collectContentFiles */
+  contentFiles: Map<number, (string | null)[]>
 }
 
 /**
  * 把会话转成请求的 messages：历史轮次 + 本轮提问；续写时末尾再带上本轮 assistant。
+ * 同时返回请求下标与本地消息、附件的对应关系，供解析 400 报错使用。
  */
 export const toRequestMessages = (
   history: Message[],
@@ -333,8 +374,8 @@ export const toRequestMessages = (
   prefix?: AssistantMessage,
   thinking = prefix?.thinking ?? false,
   latestReminder?: string
-): MessageParam[] => {
-  const messages = toContextMessages(history)
+): RequestMessages => {
+  const { messages, messageIds } = buildContextMessages(history)
   const previousReminder = messages.findLast(
     (message): message is Extract<MessageParam, { role: 'latest_reminder' }> =>
       message.role === 'latest_reminder'
@@ -342,8 +383,10 @@ export const toRequestMessages = (
   // 仅在快照内容变化时插入；最后一条快照可能出现在任意历史轮次之前。
   if (latestReminder && latestReminder !== previousReminder) {
     messages.push({ role: 'latest_reminder', content: latestReminder })
+    messageIds.push(null)
   }
   messages.push(toUserParam(question))
+  messageIds.push(question.id)
   if (prefix?.prefix) {
     const assistant = toAssistantParam(prefix, true, thinking)
     // 没有非空白正文或有效思考时直接重发原问题，避免服务端拒绝空 Prefill。
@@ -355,9 +398,10 @@ export const toRequestMessages = (
       )
     ) {
       messages.push(assistant)
+      messageIds.push(prefix.id)
     }
   }
-  return messages
+  return { messages, messageIds, contentFiles: collectContentFiles(messages) }
 }
 
 /** 思考用时（秒），至少 1 秒 */

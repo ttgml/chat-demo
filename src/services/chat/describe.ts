@@ -7,7 +7,7 @@ export type Notice = {
   /** 模板答复使用正文样式；其余统一为红色错误提示。 */
   presentation?: 'response'
   /** 需要用户处理的问题附带的操作 */
-  action?: 'apiKey' | 'topUp'
+  action?: 'apiKey' | 'topUp' | 'omitFiles'
 }
 
 const getTemplateText = (reply: AssistantMessage) =>
@@ -30,6 +30,13 @@ export const describeReply = (reply: AssistantMessage): Notice | null => {
     }
     if (kind === 'network') {
       return { text: translate('commonNetworkErrorToast') }
+    }
+    // 服务端明确指出某个附件无法处理：给出移除入口，重试或换句话都无济于事
+    if (reply.error.fileIssue?.names.length) {
+      return {
+        text: translate('replyUnusableFiles', { names: reply.error.fileIssue.names.join('、') }),
+        action: 'omitFiles',
+      }
     }
     switch (classifyStatus(status)) {
       case 'unauthorized':

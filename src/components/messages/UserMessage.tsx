@@ -72,6 +72,7 @@ export const UserMessage = memo(function UserMessage({
           {message.files.map((file) => (
             <MessageFile
               key={file.id}
+              sessionId={sessionId}
               file={file}
               onRetry={retryUploadId ? () => retryUpload(sessionId, retryUploadId) : null}
             />

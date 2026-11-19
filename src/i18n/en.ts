@@ -103,6 +103,17 @@ export const en = {
     'The API Key is invalid or has been deleted. Please replace it and try again.',
   replyInsufficientBalance: 'Insufficient account balance. Please top up and try again.',
   replyRateLimited: 'Too many requests. Please try again later.',
+  replyUnusableFiles:
+    'The model cannot process these attachments ({names}), so retrying will not help. Remove them from the context and reply again; the original files are kept.',
+  replyRemoveUnusableFiles: 'Remove and retry',
+  removeUnusableFilesModalTitle: 'Remove attachments and reply again',
+  removeUnusableFilesModalDescription:
+    'The model cannot process the following attachments. They will be removed from this conversation context (your local files are kept) and the reply will be generated again.',
+  removeFilesConfirm: 'Remove and retry',
+  omittedFileBadge: 'Removed from context',
+  omittedFileRestore: 'Restore to context',
+  omittedFilesUserMessage:
+    '(The attachments in the original message were removed from the context)',
   completionServerBusyToast: 'Server busy, please try again later.',
   unknownError: 'Unknown error',
   replyRefused: "Sorry, that's beyond my current scope. Let's talk about something else.",
