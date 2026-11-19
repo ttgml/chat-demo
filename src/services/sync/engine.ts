@@ -13,6 +13,7 @@ import {
   syncDeleteSession,
   syncGetFile,
   syncGetSession,
+  syncGetSessions,
   syncPutFile,
   syncPutSession,
   syncState,
@@ -39,7 +40,7 @@ import {
   type PendingItem,
 } from './meta.js'
 import { setSyncStatus, syncErrorKey, useSyncStatus } from './status.js'
-import { SyncError } from './types.js'
+import { SyncError, type SyncSessionsBatch } from './types.js'
 import { isSessionPayload, sessionFileIds } from './validate.js'
 import { createWatch, type WatchController } from './watch.js'
 
@@ -51,6 +52,8 @@ const POLL_INTERVAL_MS = 60_000
 const WATCH_DEBOUNCE_MS = 200
 /** 单次拉取的分页大小 */
 const PAGE_SIZE = 200
+/** 批量会话接口单次请求的 id 数（服务端上限 500，按页大小留足余量） */
+const BATCH_SIZE = 100
 /** 失败后的重试退避上限 */
 const MAX_BACKOFF_MS = 60_000
 
@@ -306,6 +309,43 @@ const push = async (): Promise<number> => {
   return conflicts
 }
 
+/** 按 id 批量取会话详情；服务端可能因 payload 总量超预算而截断 */
+const fetchSessions = async (ids: string[]): Promise<Map<string, FetchedSession>> => {
+  const fetched = new Map<string, FetchedSession>()
+  const missing: string[] = []
+  for (let index = 0; index < ids.length; index += BATCH_SIZE) {
+    const chunk = ids.slice(index, index + BATCH_SIZE)
+    let response: SyncSessionsBatch
+    try {
+      response = await syncGetSessions(chunk)
+    } catch (error) {
+      if (!(error instanceof SyncError) || error.status !== 404) {
+        throw error
+      }
+      // 旧版服务端还没有批量接口：退回逐条 GET，避免升级前端后同步直接用不了。
+      missing.push(...chunk)
+      continue
+    }
+    for (const item of response.sessions) {
+      fetched.set(item.id, item)
+    }
+    if (response.truncated) {
+      missing.push(...chunk.filter((id) => !fetched.has(id)))
+    }
+  }
+  // 截断（单页 payload 超预算）或旧版服务端才会走到这里，正常都是空。
+  for (const id of missing) {
+    try {
+      fetched.set(id, await syncGetSession(id))
+    } catch (error) {
+      if (isUnauthorized(error)) {
+        throw error
+      }
+    }
+  }
+  return fetched
+}
+
 /** 拉取一页变更并应用；返回分页信息、被服务端覆盖的本地改动数、以及本地更新的会话数 */
 const pullPage = async (
   since: number
@@ -338,14 +378,34 @@ const pullPage = async (
     }
   }
 
+  // 先把本页要用的会话一次性取回：逐条 GET 会把一页变成最多 200 次请求。
+  // 同一次 pull 内本地 rev 不会变（落库与游标都在最后统一提交），所以可以缓存。
+  const localRevs = new Map<string, number>()
   for (const change of page.sessions) {
-    const localRev = await getSessionRev(change.id)
+    if (!localRevs.has(change.id)) {
+      localRevs.set(change.id, await getSessionRev(change.id))
+    }
+  }
+  const wanted = new Set<string>()
+  for (const change of page.sessions) {
+    if ((localRevs.get(change.id) ?? 0) < change.rev) {
+      wanted.add(change.id)
+    }
+  }
+  const fetched = await fetchSessions([...wanted])
+
+  for (const change of page.sessions) {
+    const localRev = localRevs.get(change.id) ?? 0
     // 本地已持有不早于该变更的版本：可能是自己刚上传的回环，也可能是更晚的恢复。
     // 墓碑也必须跳过，否则旧的删除事件会删掉本地已恢复或已更新的会话。
     if (localRev >= change.rev) {
       continue
     }
-    const remote = await syncGetSession(change.id)
+    const remote = fetched.get(change.id)
+    if (!remote) {
+      // 服务端已没有这条记录（或批量响应被截断且补拉也失败）：留到下一轮对账。
+      continue
+    }
     if (remote.deleted) {
       // 导入期间 push 若有单条失败，云端仍可能暂时是墓碑。此时不能用旧墓碑删掉
       // 刚导入的会话：保留 origin='import' 的队列项，下一轮 push 会 revive 覆盖它。

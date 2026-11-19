@@ -1,5 +1,5 @@
 import { useSyncConfig } from './config.js'
-import { SyncError, type SyncChanges, type SyncErrorBody } from './types.js'
+import { SyncError, type SyncChanges, type SyncErrorBody, type SyncSessionsBatch } from './types.js'
 
 const REQUEST_TIMEOUT = 20_000
 /** 大附件在移动网络下可能远超普通 API 超时；32MB 按 2Mbps 上传就要两分钟。 */
@@ -164,6 +164,25 @@ export const syncGetSession = (id: string, signal?: AbortSignal) =>
     deleted: boolean
     session: unknown
   }>(`/api/session/${encodeURIComponent(id)}`, {}, signal)
+
+/**
+ * 批量取会话详情。分页同步一页最多 200 条变更，逐条 GET 会变成 200 次请求，
+ * 每次还要鉴权查一次数据库，所以服务端提供了批量接口。
+ * 响应可能因 payload 总量超预算被截断（truncated），缺失的 id 由调用方回退单条接口。
+ */
+export const syncGetSessions = (
+  ids: string[],
+  signal?: AbortSignal
+): Promise<SyncSessionsBatch> =>
+  jsonRequest<SyncSessionsBatch>(
+    '/api/sessions/batch',
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ids }),
+    },
+    signal
+  )
 
 export const syncPutSession = (
   id: string,

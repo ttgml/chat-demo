@@ -55,15 +55,41 @@ CREATE TABLE IF NOT EXISTS files (
 CREATE INDEX IF NOT EXISTS files_changes_idx ON files(user_id, rev);
 `
 
-func openDB(ctx context.Context, url string) (*pgxpool.Pool, error) {
+// poolOptions 描述连接池上限；WebSocket 握手和每个 REST 请求都要借连接，
+// 用户量上来后需要用环境变量调整。零值表示使用默认值。
+type poolOptions struct {
+	MaxConns        int32
+	MinConns        int32
+	MaxConnLifetime time.Duration
+	MaxConnIdleTime time.Duration
+}
+
+func openDB(ctx context.Context, url string, opts poolOptions) (*pgxpool.Pool, error) {
 	config, err := pgxpool.ParseConfig(url)
 	if err != nil {
 		return nil, fmt.Errorf("parse database url: %w", err)
 	}
-	config.MaxConns = 10
-	config.MinConns = 0
-	config.MaxConnLifetime = time.Hour
-	config.MaxConnIdleTime = 10 * time.Minute
+	if opts.MaxConns > 0 {
+		config.MaxConns = opts.MaxConns
+	} else if config.MaxConns > 10 {
+		// 与旧版本的写死值保持一致，避免默认把托管库的连接数吃满。
+		config.MaxConns = 10
+	}
+	if opts.MinConns > 0 {
+		config.MinConns = opts.MinConns
+	}
+	if opts.MaxConnLifetime > 0 {
+		config.MaxConnLifetime = opts.MaxConnLifetime
+	}
+	if opts.MaxConnIdleTime > 0 {
+		config.MaxConnIdleTime = opts.MaxConnIdleTime
+	}
+	if config.MaxConnLifetime == 0 {
+		config.MaxConnLifetime = time.Hour
+	}
+	if config.MaxConnIdleTime == 0 {
+		config.MaxConnIdleTime = 10 * time.Minute
+	}
 
 	pool, err := pgxpool.NewWithConfig(ctx, config)
 	if err != nil {

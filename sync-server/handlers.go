@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strconv"
@@ -46,7 +47,7 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	token, err := s.auth.register(r.Context(), body.Username, body.Password)
+	token, err := s.auth.register(r.Context(), body.Username, body.Password, clientIP(r))
 	if err != nil {
 		writeError(w, err)
 		return
@@ -233,6 +234,108 @@ func (s *Server) handleGetSession(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"rev": rev, "updatedAt": updatedAt, "deleted": deleted, "session": json.RawMessage(payload),
 	})
+}
+
+const (
+	// 一次批量拉取的会话数上限，与 /api/changes 的 limit 上限一致。
+	maxBatchSessions = 500
+	// 单次批量响应的 payload 字节预算。超过后停手并置 truncated，
+	// 客户端对缺失的 id 退回单条接口，避免一次响应把内存/流量打爆。
+	maxBatchPayloadBytes = 16 << 20
+)
+
+type batchSessionsRequest struct {
+	IDs []string `json:"ids"`
+}
+
+type batchSession struct {
+	ID        string          `json:"id"`
+	Rev       int64           `json:"rev"`
+	UpdatedAt int64           `json:"updatedAt"`
+	Deleted   bool            `json:"deleted"`
+	Session   json.RawMessage `json:"session"`
+}
+
+type batchSessionsResponse struct {
+	Sessions []batchSession `json:"sessions"`
+	// Truncated 表示因 payload 总量超过预算被提前截断，缺失的 id 需要回退单条接口。
+	Truncated bool `json:"truncated,omitempty"`
+}
+
+// handleGetSessions 批量返回会话原始 JSON（POST /api/sessions/batch）。
+// 语义与 GET /api/session/{id} 完全一致（含墓碑）；从不存在的 id 直接不出现在响应里。
+// 客户端增量拉取一页最多 200 条，逐条 GET 会变成 200 次请求 + 400 次查询，
+// 批量接口把这两个数字降成 1（或按 ids 分块后的少数几次）。
+func (s *Server) handleGetSessions(w http.ResponseWriter, r *http.Request) {
+	var body batchSessionsRequest
+	if err := decodeJSON(r, &body); err != nil {
+		writeError(w, err)
+		return
+	}
+	if len(body.IDs) == 0 || len(body.IDs) > maxBatchSessions {
+		writeError(w, fail(http.StatusBadRequest, "invalid_ids",
+			fmt.Sprintf("ids must contain 1-%d entries", maxBatchSessions)))
+		return
+	}
+	ids := make([]string, 0, len(body.IDs))
+	seen := make(map[string]bool, len(body.IDs))
+	for _, id := range body.IDs {
+		if !validID(id) {
+			writeError(w, fail(http.StatusBadRequest, "invalid_id",
+				"id must be 1-128 chars of letters, digits, _ . -"))
+			return
+		}
+		if seen[id] {
+			continue
+		}
+		seen[id] = true
+		ids = append(ids, id)
+	}
+	rows, err := s.db.Query(r.Context(), `
+        SELECT id, rev, updated_at, deleted, COALESCE(payload, 'null'::jsonb) FROM sessions
+        WHERE user_id = $1 AND id = ANY($2)
+    `, userFrom(r), ids)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	defer rows.Close()
+
+	found := make(map[string]batchSession, len(ids))
+	var size int64
+	truncated := false
+	for rows.Next() {
+		var item batchSession
+		if err := rows.Scan(&item.ID, &item.Rev, &item.UpdatedAt, &item.Deleted, &item.Session); err != nil {
+			writeError(w, err)
+			return
+		}
+		if !truncated {
+			// 单个 payload 可能就很大，所以按累加后的总量判断，且至少返回一条。
+			size += int64(len(item.Session))
+			if len(found) > 0 && size > maxBatchPayloadBytes {
+				truncated = true
+			}
+		}
+		if truncated {
+			continue
+		}
+		found[item.ID] = item
+	}
+	if err := rows.Err(); err != nil {
+		writeError(w, err)
+		return
+	}
+	rows.Close()
+
+	result := batchSessionsResponse{Sessions: make([]batchSession, 0, len(found)), Truncated: truncated}
+	// 按请求顺序返回，客户端对账时不必再排序。
+	for _, id := range ids {
+		if item, ok := found[id]; ok {
+			result.Sessions = append(result.Sessions, item)
+		}
+	}
+	writeJSON(w, http.StatusOK, result)
 }
 
 type putSessionRequest struct {

@@ -43,7 +43,7 @@ func testServerWithConfig(t *testing.T, mutate func(*Config)) (*httptest.Server,
 		t.Skip("SYNC_TEST_DATABASE_URL not set, skipping integration test")
 	}
 	ctx := context.Background()
-	db, err := openDB(ctx, url)
+	db, err := openDB(ctx, url, poolOptions{})
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
@@ -566,5 +566,114 @@ func TestPutSessionRespectsMaxSessionBytes(t *testing.T) {
 	}, nil)
 	if status != http.StatusOK {
 		t.Fatalf("session under limit status=%d, want 200", status)
+	}
+}
+
+// 批量拉取是分页同步的主路径：一页最多 200 条变更，逐条 GET 会放大成数百次请求。
+func TestBatchSessions(t *testing.T) {
+	ts, _ := testServer(t)
+	alice := registerUser(t, ts, "batchalice")
+	bob := registerUser(t, ts, "batchbob")
+
+	putSession := func(token, id string) int64 {
+		var result struct {
+			Rev int64 `json:"rev"`
+		}
+		status := doJSON(t, ts, "PUT", "/api/session/"+id, token, map[string]any{
+			"baseRev": 0, "updatedAt": 10,
+			"session": map[string]any{"id": id, "title": id, "createdAt": 1, "updatedAt": 10, "messages": []any{}},
+		}, &result)
+		if status != http.StatusOK {
+			t.Fatalf("put %s status=%d", id, status)
+		}
+		return result.Rev
+	}
+	revA := putSession(alice, "batch-a")
+	revB := putSession(alice, "batch-b")
+	// 删除 batch-b，批量接口必须同样返回墓碑。
+	if status := doJSON(t, ts, "DELETE", "/api/session/batch-b?baseRev="+strconv.FormatInt(revB, 10), alice, nil, nil); status != http.StatusOK {
+		t.Fatalf("delete status=%d", status)
+	}
+
+	var batch batchSessionsResponse
+	status := doJSON(t, ts, "POST", "/api/sessions/batch", alice, map[string]any{
+		"ids": []string{"batch-a", "batch-b", "never-existed"},
+	}, &batch)
+	if status != http.StatusOK {
+		t.Fatalf("batch status=%d", status)
+	}
+	if batch.Truncated {
+		t.Fatalf("unexpected truncation: %+v", batch)
+	}
+	// 按请求顺序返回，且不存在的 id 直接不出现。
+	if len(batch.Sessions) != 2 || batch.Sessions[0].ID != "batch-a" || batch.Sessions[1].ID != "batch-b" {
+		t.Fatalf("batch sessions = %+v", batch.Sessions)
+	}
+	if batch.Sessions[0].Rev != revA || batch.Sessions[0].Deleted {
+		t.Fatalf("live session = %+v", batch.Sessions[0])
+	}
+	if !json.Valid(batch.Sessions[0].Session) || !strings.Contains(string(batch.Sessions[0].Session), `"batch-a"`) {
+		t.Fatalf("session payload = %s", batch.Sessions[0].Session)
+	}
+	if !batch.Sessions[1].Deleted {
+		t.Fatalf("tombstone not reported: %+v", batch.Sessions[1])
+	}
+
+	// 用户隔离：bob 拿不到 alice 的会话。
+	var bobBatch batchSessionsResponse
+	doJSON(t, ts, "POST", "/api/sessions/batch", bob, map[string]any{"ids": []string{"batch-a"}}, &bobBatch)
+	if len(bobBatch.Sessions) != 0 {
+		t.Fatalf("bob sees alice sessions: %+v", bobBatch.Sessions)
+	}
+
+	// 参数校验：空列表、超量、非法 id、未登录。
+	if status := doJSON(t, ts, "POST", "/api/sessions/batch", alice, map[string]any{"ids": []string{}}, nil); status != http.StatusBadRequest {
+		t.Fatalf("empty ids status=%d, want 400", status)
+	}
+	tooMany := make([]string, maxBatchSessions+1)
+	for index := range tooMany {
+		tooMany[index] = "id-" + strconv.Itoa(index)
+	}
+	if status := doJSON(t, ts, "POST", "/api/sessions/batch", alice, map[string]any{"ids": tooMany}, nil); status != http.StatusBadRequest {
+		t.Fatalf("too many ids status=%d, want 400", status)
+	}
+	if status := doJSON(t, ts, "POST", "/api/sessions/batch", alice, map[string]any{"ids": []string{"../etc/passwd"}}, nil); status != http.StatusBadRequest {
+		t.Fatalf("invalid id status=%d, want 400", status)
+	}
+	if status := doJSON(t, ts, "POST", "/api/sessions/batch", "", map[string]any{"ids": []string{"batch-a"}}, nil); status != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated status=%d, want 401", status)
+	}
+}
+
+// 注册同样是 bcrypt 计算，必须与登录一样按 IP 限流。
+func TestRegisterRateLimited(t *testing.T) {
+	ts, _ := testServerWithConfig(t, func(cfg *Config) { cfg.LoginLimit = 3 })
+	// 一次成功注册会重置该 IP 的计数，先拿到一个可用账号用于验证登录不受注册限流影响。
+	registerUser(t, ts, "rateuser")
+
+	for attempt := 1; attempt <= 3; attempt++ {
+		status := doJSON(t, ts, "POST", "/api/register", "", map[string]string{
+			"username": uniqueName("short") + strconv.Itoa(attempt), "password": "x",
+		}, nil)
+		if status != http.StatusBadRequest {
+			t.Fatalf("attempt %d status=%d, want 400", attempt, status)
+		}
+	}
+	status := doJSON(t, ts, "POST", "/api/register", "", map[string]string{
+		"username": uniqueName("short") + "x", "password": "x",
+	}, nil)
+	if status != http.StatusTooManyRequests {
+		t.Fatalf("register over limit status=%d, want 429", status)
+	}
+
+	// 登录用的是独立计数：注册被限流不能连带把登录也封掉。
+	var login struct {
+		Token string `json:"token"`
+	}
+	status = doJSON(t, ts, "POST", "/api/login", "", map[string]string{
+		"username": uniqueName("rateuser"), "password": "password123",
+	}, &login)
+	if status != http.StatusOK || login.Token == "" {
+		t.Fatalf("login after register limit status=%d token=%q", status, login.Token)
 	}
 }

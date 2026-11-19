@@ -22,10 +22,18 @@ type AuthService struct {
 	db      *pgxpool.Pool
 	ttl     time.Duration
 	limiter *loginLimiter
+	// 注册单独计数：两者共用一份预算会让“反复试密码”连带把注册也封掉，
+	// 也会让批量注册吃掉正常登录的额度。
+	registerLimiter *loginLimiter
 }
 
 func newAuthService(db *pgxpool.Pool, ttl time.Duration, limit int, window time.Duration) *AuthService {
-	return &AuthService{db: db, ttl: ttl, limiter: newLoginLimiter(limit, window)}
+	return &AuthService{
+		db:              db,
+		ttl:             ttl,
+		limiter:         newLoginLimiter(limit, window),
+		registerLimiter: newLoginLimiter(limit, window),
+	}
 }
 
 func validateCredentials(username, password string) error {
@@ -40,7 +48,12 @@ func validateCredentials(username, password string) error {
 	return nil
 }
 
-func (a *AuthService) register(ctx context.Context, username, password string) (string, error) {
+// register 注册新账号。与 login 一样按 IP 限流：bcrypt 是刻意昂贵的计算，
+// 不限流时匿名请求可以用它把 CPU 和数据库撑满。
+func (a *AuthService) register(ctx context.Context, username, password, ip string) (string, error) {
+	if !a.registerLimiter.allow(ip) {
+		return "", errRateLimited
+	}
 	if err := validateCredentials(username, password); err != nil {
 		return "", err
 	}
@@ -74,6 +87,7 @@ func (a *AuthService) register(ctx context.Context, username, password string) (
 	if err := tx.Commit(ctx); err != nil {
 		return "", err
 	}
+	a.registerLimiter.reset(ip)
 	return a.issueToken(ctx, id)
 }
 

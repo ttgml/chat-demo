@@ -26,6 +26,12 @@ export type RemoteSession = {
   session: unknown
 }
 
+/** POST /api/sessions/batch 的响应；truncated 时缺失的 id 需回退单条接口 */
+export type SyncSessionsBatch = {
+  sessions: (RemoteSession & { id: string })[]
+  truncated?: boolean
+}
+
 export type SessionChange = {
   id: string
   rev: number

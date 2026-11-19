@@ -21,7 +21,10 @@ func main() {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	db, err := openDB(ctx, cfg.DatabaseURL)
+	db, err := openDB(ctx, cfg.DatabaseURL, poolOptions{
+		MaxConns: cfg.DBMaxConns,
+		MinConns: cfg.DBMinConns,
+	})
 	if err != nil {
 		slog.Error("database error", "error", err)
 		os.Exit(1)
@@ -64,6 +67,9 @@ func main() {
 	}
 }
 
+// credentialsBodyBytes 是注册/登录请求体的上限：32 字节用户名 + 72 字节密码也才百来字节。
+const credentialsBodyBytes = 4 << 10
+
 func routes(srv *Server, cfg Config) http.Handler {
 	// 测试等场景可能直接构造 Server；保证 watch 端点始终有可用的 hub。
 	if srv.hub == nil {
@@ -72,8 +78,10 @@ func routes(srv *Server, cfg Config) http.Handler {
 	mux := http.NewServeMux()
 
 	// 公开接口：注册、登录。
-	mux.HandleFunc("POST /api/register", srv.handleRegister)
-	mux.HandleFunc("POST /api/login", srv.handleLogin)
+	// 单独限 body 大小：全局上限是按附件尺寸算的（几十 MB），
+	// 不能拿它去解析只用几十字节的凭据，否则匿名请求就能让服务端解析超大 JSON。
+	mux.Handle("POST /api/register", maxBytes(credentialsBodyBytes, http.HandlerFunc(srv.handleRegister)))
+	mux.Handle("POST /api/login", maxBytes(credentialsBodyBytes, http.HandlerFunc(srv.handleLogin)))
 
 	// WebSocket 在握手后的首帧携带 token，不能套用 requireAuth（浏览器
 	// WebSocket API 无法设置 Authorization 头），鉴权在 handleWatch 内完成。
@@ -85,6 +93,8 @@ func routes(srv *Server, cfg Config) http.Handler {
 	mux.Handle("GET /api/state", authOnly(http.HandlerFunc(srv.handleState)))
 	mux.Handle("GET /api/changes", authOnly(http.HandlerFunc(srv.handleChanges)))
 	mux.Handle("GET /api/session/{id}", authOnly(http.HandlerFunc(srv.handleGetSession)))
+	// 批量拉取：客户端一次同步最多要取一页（≤200）个会话，逐条 GET 会放大成数百次请求。
+	mux.Handle("POST /api/sessions/batch", authOnly(http.HandlerFunc(srv.handleGetSessions)))
 	mux.Handle("PUT /api/session/{id}", authOnly(http.HandlerFunc(srv.handlePutSession)))
 	mux.Handle("DELETE /api/session/{id}", authOnly(http.HandlerFunc(srv.handleDeleteSession)))
 	mux.Handle("PUT /api/file/{id}", authOnly(http.HandlerFunc(srv.handlePutFile)))
@@ -101,6 +111,7 @@ func routes(srv *Server, cfg Config) http.Handler {
 		globalLimit = cfg.MaxFileBytes
 	}
 	var handler http.Handler = mux
+	handler = compressJSON(handler)
 	handler = maxBytes(globalLimit+(1<<20), handler)
 	handler = cors(cfg.AllowedOrigins, cfg.RequireHTTPS)(handler)
 	handler = securityHeaders(handler)

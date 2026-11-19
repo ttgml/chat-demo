@@ -19,6 +19,9 @@ type Config struct {
 	MaxFileBytes    int64
 	LoginLimit      int
 	LoginWindow     time.Duration
+	// 数据库连接池；WebSocket 握手与每个 REST 请求都要借连接。
+	DBMaxConns int32
+	DBMinConns int32
 }
 
 func loadConfig() (Config, error) {
@@ -31,6 +34,8 @@ func loadConfig() (Config, error) {
 		MaxFileBytes:    envInt64("SYNC_MAX_FILE_BYTES", 32<<20),
 		LoginLimit:      int(envInt64("SYNC_LOGIN_LIMIT", 10)),
 		LoginWindow:     envDuration("SYNC_LOGIN_WINDOW", 15*time.Minute),
+		DBMaxConns:      int32(envInt64("SYNC_DB_MAX_CONNS", 10)),
+		DBMinConns:      int32(envInt64("SYNC_DB_MIN_CONNS", 0)),
 	}
 
 	origins := os.Getenv("SYNC_ALLOWED_ORIGINS")
@@ -55,6 +60,12 @@ func loadConfig() (Config, error) {
 	}
 	if cfg.LoginLimit <= 0 || cfg.LoginWindow <= 0 {
 		return cfg, fmt.Errorf("login limit and window must be positive")
+	}
+	if cfg.DBMaxConns <= 0 {
+		return cfg, fmt.Errorf("SYNC_DB_MAX_CONNS must be positive")
+	}
+	if cfg.DBMinConns < 0 || cfg.DBMinConns > cfg.DBMaxConns {
+		return cfg, fmt.Errorf("SYNC_DB_MIN_CONNS must be between 0 and SYNC_DB_MAX_CONNS")
 	}
 	return cfg, nil
 }
