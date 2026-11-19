@@ -34,6 +34,13 @@
   color: var(--dsw-alias-brand-primary);
 }
 
+.topActions {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+  gap: 2px;
+}
+
 .newChat {
   position: relative;
   display: flex;
