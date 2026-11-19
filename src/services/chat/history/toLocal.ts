@@ -286,6 +286,8 @@ export const toLocalSession = (file: SessionFile): LocalSession => {
     title: file.title ?? '',
     createdAt: time(file.inserted_at),
     updatedAt: time(file.updated_at),
+    // 归档只有布尔标记，没有置顶时间；沿用最后更新时间，置顶组之间再按它排序。
+    ...(file.pinned ? { pinnedAt: time(file.updated_at) } : {}),
     ...buildTree(file),
   }
   const images = new Map<string, string>()

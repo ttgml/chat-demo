@@ -37,6 +37,10 @@ export const isSessionPayload = (value: unknown, expectedId?: string): value is 
   ) {
     return false
   }
+  // 置顶时间是可选字段；类型不对会让列表排序出现 NaN，按损坏数据处理。
+  if (value.pinnedAt !== undefined && !isFiniteNumber(value.pinnedAt)) {
+    return false
+  }
   for (const message of value.messages) {
     if (!isRecord(message) || !isNonEmptyString(message.id) || !isFiniteNumber(message.createdAt)) {
       return false

@@ -110,6 +110,8 @@ export type Session = {
   title: string
   createdAt: number
   updatedAt: number
+  /** 置顶时间；undefined 表示未置顶。置顶不改变 updatedAt，列表按它排在时间分组之前。 */
+  pinnedAt?: number
   /** 包含所有分支的消息，按创建顺序存储。 */
   messages: Message[]
   /** undefined 表示线性消息列表；null 表示空会话。 */
@@ -117,7 +119,11 @@ export type Session = {
 }
 
 /** 会话列表元数据；消息只在打开会话时加载。 */
-export type SessionSummary = Pick<Session, 'id' | 'title' | 'createdAt' | 'updatedAt'>
+export type SessionSummary = Pick<Session, 'id' | 'title' | 'createdAt' | 'updatedAt' | 'pinnedAt'>
+
+/** 已置顶；置顶时间缺失的旧数据按未置顶处理。 */
+export const isPinned = (session: { pinnedAt?: number }) =>
+  session.pinnedAt !== undefined && session.pinnedAt > 0
 
 /** 显式提取字段，避免将完整会话的消息带进列表。 */
 export const toSessionSummary = (session: SessionSummary): SessionSummary => ({
@@ -125,16 +131,22 @@ export const toSessionSummary = (session: SessionSummary): SessionSummary => ({
   title: session.title,
   createdAt: session.createdAt,
   updatedAt: session.updatedAt,
+  pinnedAt: session.pinnedAt,
 })
 
 /**
- * 会话内容新鲜度：updatedAt 在每次消息落盘时都会刷新，等价于「最后一条消息的时间」；
- * 外部归档导入的会话可能只带消息时间，因此再取最后一条消息的 createdAt 兜底。
- * 同步冲突与拉取覆盖都按这个值比较，避免两处判断口径不一致。
+ * 会话新鲜度：与内容最后一次变化的时间比较，同步冲突与拉取覆盖都按这个值判断，避免两处口径不一致。
+ * updatedAt 在每次消息落盘时刷新；外部归档导入的会话可能只带消息时间，再用最后一条消息的 createdAt 兜底；
+ * 置顶/取消置顶不刷新 updatedAt，但它同样是用户可见的改动，需要一起参与比较。
+ * 参数只要最小字段，列表元数据（没有消息）与完整会话都能直接传入。
  */
-export const sessionFreshness = (session: Session): number => {
-  let time = session.updatedAt
-  for (const message of session.messages) {
+export const sessionFreshness = (session: {
+  updatedAt: number
+  pinnedAt?: number
+  messages?: readonly { createdAt: number }[]
+}): number => {
+  let time = Math.max(session.updatedAt, session.pinnedAt ?? 0)
+  for (const message of session.messages ?? []) {
     if (message.createdAt > time) {
       time = message.createdAt
     }

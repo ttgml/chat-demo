@@ -1,9 +1,14 @@
 import clsx from 'clsx'
 import { memo, useState } from 'react'
 import { useTranslate } from '../../i18n/index.js'
-import { IconEditOutline16, IconEllipsisOutline16, IconTrashOutline16 } from '../base/icons.js'
-import { renameSession, selectSession } from '../../services/chat/store.js'
-import type { SessionSummary } from '../../services/chat/types.js'
+import {
+  IconEditOutline16,
+  IconEllipsisOutline16,
+  IconPinOutline16,
+  IconTrashOutline16,
+} from '../base/icons.js'
+import { renameSession, selectSession, setSessionPinned } from '../../services/chat/store.js'
+import { isPinned, type SessionSummary } from '../../services/chat/types.js'
 import { IconButton } from '../base/IconButton.js'
 import { Menu } from '../base/Menu.js'
 import { closeMobileSider } from './mobileSiderState.js'
@@ -64,6 +69,15 @@ export const SessionItem = memo(function SessionItem({
         <Menu
           onOpenChange={setMenuOpen}
           options={[
+            {
+              key: 'pin',
+              // 置顶项使用同一个图标，文案说明当前动作
+              label: isPinned(session)
+                ? t('sessionItemMenuUnpinOption')
+                : t('sessionItemMenuPinOption'),
+              icon: <IconPinOutline16 />,
+              onSelect: () => setSessionPinned(session.id, !isPinned(session)),
+            },
             {
               key: 'rename',
               label: t('sessionItemMenuRenameOption'),

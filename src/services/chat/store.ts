@@ -24,6 +24,7 @@ import {
   toRequestMessages,
 } from './reply.js'
 import {
+  isPinned,
   toSessionSummary,
   type AssistantMessage,
   type FileAttachment,
@@ -87,7 +88,7 @@ type ChatState = {
   initError: boolean
   /** 历史导入或全部删除期间锁定交互，提交成功前仍展示原有记录。 */
   importingHistory: boolean
-  /** 仅列表元数据，按 updatedAt 降序；流式消息更新不会改变此数组。 */
+  /** 仅列表元数据，置顶在前、其余按 updatedAt 降序；流式消息更新不会改变此数组。 */
   sessions: SessionSummary[]
   sessionCache: Record<string, Session>
   sessionLoadErrors: Record<string, boolean>
@@ -112,8 +113,17 @@ export const useChatStore = create<ChatState>(() => ({
 
 const { getState: get, setState: set } = useChatStore
 
+/** 置顶会话排在最前（置顶之间按置顶时间倒序），其余按最后更新时间倒序 */
 const sortSessions = (sessions: SessionSummary[]) =>
-  [...sessions].sort((a, b) => b.updatedAt - a.updatedAt)
+  [...sessions].sort((a, b) => {
+    if (isPinned(a) !== isPinned(b)) {
+      return isPinned(a) ? -1 : 1
+    }
+    if (isPinned(a) && isPinned(b)) {
+      return (b.pinnedAt ?? 0) - (a.pinnedAt ?? 0)
+    }
+    return b.updatedAt - a.updatedAt
+  })
 
 const getSession = (id: string) => {
   const cache = get().sessionCache
@@ -126,7 +136,10 @@ const getStreamController = (id: string) => {
 }
 
 const sameSummary = (a: SessionSummary, b: SessionSummary) =>
-  a.title === b.title && a.createdAt === b.createdAt && a.updatedAt === b.updatedAt
+  a.title === b.title &&
+  a.createdAt === b.createdAt &&
+  a.updatedAt === b.updatedAt &&
+  a.pinnedAt === b.pinnedAt
 
 const sessionAccess = new Map<string, number>()
 const unsavedSessions = new Set<string>()
@@ -556,6 +569,32 @@ export const renameSession = (id: string, title: string) => {
 }
 
 /**
+ * 置顶/取消置顶。置顶不刷新 updatedAt，只记录置顶时间，避免取消置顶后会话跳到「今天」。
+ * 未打开的会话也支持：只改列表元数据，下次打开时会与详情合并。
+ */
+export const setSessionPinned = (id: string, pinned: boolean) => {
+  if (get().importingHistory || deletingSessions.has(id)) {
+    return
+  }
+  // 置顶时间是用户可见的改动，参与新鲜度比较后云端同步才能传播它。
+  const pinnedAt = pinned ? Date.now() : undefined
+  if (getSession(id)) {
+    updateSession(id, (session) => ({ ...session, pinnedAt }))
+    persist(id)
+  } else {
+    set((state) => ({
+      sessions: sortSessions(
+        state.sessions.map((session) => (session.id === id ? { ...session, pinnedAt } : session))
+      ),
+    }))
+    void db
+      .setSessionPinned(id, pinnedAt)
+      .then(() => emitChatChange({ type: 'upsert', id }))
+      .catch(db.reportStorageError('pin session'))
+  }
+}
+
+/**
  * 删除会话；本地原件仅在没有其他会话引用时清理。远端文件不删：导入、编辑、重新生成都会复用同一个附件，
  * 同一服务端文件可能被多个会话引用，不维护引用计数。
  */
@@ -653,7 +692,8 @@ export const sendMessage = (targetSessionId: string | null) => {
     sessionId = session.id
     touchSession(session.id)
     set((state) => ({
-      sessions: [toSessionSummary(session), ...state.sessions],
+      // 新会话排在最前，但仍要排在已置顶的会话之后
+      sessions: sortSessions([toSessionSummary(session), ...state.sessions]),
       sessionCache: { ...state.sessionCache, [session.id]: session },
       activeId: session.id,
     }))

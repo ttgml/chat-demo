@@ -372,9 +372,9 @@ const pullPage = async (
       }
       // 本地版本比拉下来的更新：不要落库远端旧版本，保留并补上待上传队列，
       // 下一轮 push 会以 serverRev 为 baseRev 把本地版本写回服务端。
-      // 列表元数据只有 updatedAt（正常数据里它就是最后一条消息的时间），足够做这个判断。
+      // 列表元数据没有消息，按 updatedAt 与置顶时间计算新鲜度就够用（last message 时间不会晚于 updatedAt）。
       const localSummary = localSummaries.get(change.id)
-      if (localSummary && localSummary.updatedAt > sessionFreshness(remote.session)) {
+      if (localSummary && sessionFreshness(localSummary) > sessionFreshness(remote.session)) {
         if (!pending.has(change.id)) {
           const item: PendingItem = { id: change.id, kind: 'upsert', updatedAt: Date.now() }
           await markPending(item)

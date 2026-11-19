@@ -1,7 +1,14 @@
 import type { ServerToolUseBlock } from '../../api/types.js'
 import { getVisibleMessages, normalizeSession } from '../branches.js'
 import { describeReply } from '../describe.js'
-import type { AssistantMessage, Message, ReplyBlock, Session, UserMessage } from '../types.js'
+import {
+  isPinned,
+  type AssistantMessage,
+  type Message,
+  type ReplyBlock,
+  type Session,
+  type UserMessage,
+} from '../types.js'
 import { fail } from './errors.js'
 import type {
   ChatMessage,
@@ -259,7 +266,7 @@ export const toSessionFile = (original: Session, exportImage: ExportImage): Sess
   return {
     id: session.id,
     title: session.title || null,
-    pinned: false,
+    pinned: isPinned(session),
     // 格式要求非空；空会话没有消息可指向，写 0。
     current_message_id: current ? id(current) : 0,
     inserted_at: iso(session.createdAt),
@@ -271,7 +278,7 @@ export const toSessionFile = (original: Session, exportImage: ExportImage): Sess
 export const toIndexEntry = (file: SessionFile): SessionIndexEntry => ({
   id: file.id,
   title: file.title,
-  pinned: false,
+  pinned: file.pinned,
   message_count: file.messages.length,
   inserted_at: file.inserted_at,
   updated_at: file.updated_at,
