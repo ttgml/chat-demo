@@ -645,6 +645,291 @@ func TestBatchSessions(t *testing.T) {
 	}
 }
 
+// 批量上传是 push 阶段的主路径：导入上千条历史时逐条 PUT 会放大成上千次
+// 鉴权查库 + 事务 + 广播。这里验证语义与单条接口一致（逐条乐观锁、墓碑保护），
+// 且部分冲突不会让整批失败。
+func TestBatchPutSessions(t *testing.T) {
+	ts, _ := testServer(t)
+	alice := registerUser(t, ts, "putbatchalice")
+	bob := registerUser(t, ts, "putbatchbob")
+
+	session := func(id, title string, updatedAt int64) map[string]any {
+		return map[string]any{
+			"id": id, "title": title, "createdAt": 1, "updatedAt": updatedAt, "messages": []any{},
+		}
+	}
+	// 先用单条接口写一条，作为后续冲突的基准。
+	var put struct {
+		Rev int64 `json:"rev"`
+	}
+	if status := doJSON(t, ts, "PUT", "/api/session/bp-1", alice, map[string]any{
+		"baseRev": 0, "updatedAt": 1, "session": session("bp-1", "v1", 1),
+	}, &put); status != http.StatusOK {
+		t.Fatalf("put baseline status=%d", status)
+	}
+	baselineRev := put.Rev
+
+	var batch putSessionsResponse
+	status := doJSON(t, ts, "PUT", "/api/sessions/batch", alice, map[string]any{
+		"sessions": []any{
+			// 新建
+			map[string]any{"id": "bp-2", "baseRev": 0, "updatedAt": 2, "session": session("bp-2", "v1", 2)},
+			// 过期 baseRev：单条冲突，但不能影响同批其它会话
+			map[string]any{"id": "bp-1", "baseRev": 0, "updatedAt": 3, "session": session("bp-1", "stale", 3)},
+			map[string]any{"id": "bp-3", "baseRev": 0, "updatedAt": 5, "session": session("bp-3", "v1", 5)},
+		},
+	}, &batch)
+	if status != http.StatusOK {
+		t.Fatalf("batch put status=%d", status)
+	}
+	if len(batch.Results) != 3 {
+		t.Fatalf("results = %+v", batch.Results)
+	}
+	// 按请求顺序返回，且成功项的 rev 严格递增（同一批共享一次游标推进）。
+	for index, result := range batch.Results {
+		if result.ID != []string{"bp-2", "bp-1", "bp-3"}[index] {
+			t.Fatalf("result %d out of order: %+v", index, result)
+		}
+	}
+	if batch.Results[0].Conflict || batch.Results[0].Rev <= baselineRev {
+		t.Fatalf("new session result = %+v", batch.Results[0])
+	}
+	if !batch.Results[1].Conflict || batch.Results[1].ServerRev != baselineRev || batch.Results[1].Deleted {
+		t.Fatalf("stale session result = %+v", batch.Results[1])
+	}
+	if batch.Results[2].Conflict || batch.Results[2].Rev <= batch.Results[0].Rev {
+		t.Fatalf("third result = %+v", batch.Results[2])
+	}
+
+	// 冲突项不能落库：bp-1 还是第一版。
+	var got struct {
+		Rev     int64          `json:"rev"`
+		Session map[string]any `json:"session"`
+	}
+	doJSON(t, ts, "GET", "/api/session/bp-1", alice, nil, &got)
+	if got.Session["title"] != "v1" || got.Rev != baselineRev {
+		t.Fatalf("bp-1 = rev %d session %+v", got.Rev, got.Session)
+	}
+
+	// 整批只推进一次游标：state.rev 等于本批最大 rev。
+	var state struct {
+		Rev      int64 `json:"rev"`
+		Sessions int64 `json:"sessions"`
+	}
+	doJSON(t, ts, "GET", "/api/state", alice, nil, &state)
+	if state.Rev != batch.Results[2].Rev || state.Sessions != 3 {
+		t.Fatalf("state = %+v, want rev=%d sessions=3", state, batch.Results[2].Rev)
+	}
+
+	// 带正确 baseRev 的更新在下一批里成功。
+	var update putSessionsResponse
+	doJSON(t, ts, "PUT", "/api/sessions/batch", alice, map[string]any{
+		"sessions": []any{
+			map[string]any{"id": "bp-1", "baseRev": baselineRev, "updatedAt": 4, "session": session("bp-1", "v2", 4)},
+		},
+	}, &update)
+	if len(update.Results) != 1 || update.Results[0].Conflict {
+		t.Fatalf("update result = %+v", update.Results)
+	}
+	doJSON(t, ts, "GET", "/api/session/bp-1", alice, nil, &got)
+	if got.Session["title"] != "v2" || got.Rev != update.Results[0].Rev {
+		t.Fatalf("bp-1 = rev %d session %+v", got.Rev, got.Session)
+	}
+
+	// 墓碑风控与单条接口一致：默认冲突、带 revive 才能恢复。
+	if status := doJSON(t, ts, "DELETE", "/api/session/bp-3?baseRev="+strconv.FormatInt(batch.Results[2].Rev, 10), alice, nil, &put); status != http.StatusOK {
+		t.Fatalf("delete status=%d", status)
+	}
+	tombstoneRev := put.Rev
+	var refused putSessionsResponse
+	doJSON(t, ts, "PUT", "/api/sessions/batch", alice, map[string]any{
+		"sessions": []any{
+			map[string]any{"id": "bp-3", "baseRev": tombstoneRev, "updatedAt": 6, "session": session("bp-3", "old", 6)},
+		},
+	}, &refused)
+	if len(refused.Results) != 1 || !refused.Results[0].Conflict || !refused.Results[0].Deleted {
+		t.Fatalf("tombstone without revive = %+v", refused.Results)
+	}
+	var revived putSessionsResponse
+	doJSON(t, ts, "PUT", "/api/sessions/batch", alice, map[string]any{
+		"sessions": []any{
+			map[string]any{"id": "bp-3", "baseRev": tombstoneRev, "updatedAt": 7, "revive": true, "session": session("bp-3", "revived", 7)},
+		},
+	}, &revived)
+	if len(revived.Results) != 1 || revived.Results[0].Conflict || revived.Results[0].Rev <= tombstoneRev {
+		t.Fatalf("revive result = %+v", revived.Results)
+	}
+
+	// 用户隔离：bob 的同一个 id 是另一条记录，不会与 alice 的版本号冲突。
+	var bobBatch putSessionsResponse
+	doJSON(t, ts, "PUT", "/api/sessions/batch", bob, map[string]any{
+		"sessions": []any{
+			map[string]any{"id": "bp-1", "baseRev": 0, "updatedAt": 1, "session": session("bp-1", "bob", 1)},
+		},
+	}, &bobBatch)
+	if len(bobBatch.Results) != 1 || bobBatch.Results[0].Conflict {
+		t.Fatalf("bob batch = %+v", bobBatch.Results)
+	}
+	doJSON(t, ts, "GET", "/api/session/bp-1", alice, nil, &got)
+	if got.Session["title"] != "v2" {
+		t.Fatalf("alice session overwritten by bob: %+v", got.Session)
+	}
+
+	// 参数校验。
+	if status := doJSON(t, ts, "PUT", "/api/sessions/batch", alice, map[string]any{"sessions": []any{}}, nil); status != http.StatusBadRequest {
+		t.Fatalf("empty batch status=%d, want 400", status)
+	}
+	tooMany := make([]any, maxPutBatchSessions+1)
+	for index := range tooMany {
+		id := "id-" + strconv.Itoa(index)
+		tooMany[index] = map[string]any{"id": id, "baseRev": 0, "session": session(id, id, 1)}
+	}
+	if status := doJSON(t, ts, "PUT", "/api/sessions/batch", alice, map[string]any{"sessions": tooMany}, nil); status != http.StatusBadRequest {
+		t.Fatalf("oversized batch status=%d, want 400", status)
+	}
+	if status := doJSON(t, ts, "PUT", "/api/sessions/batch", alice, map[string]any{
+		"sessions": []any{
+			map[string]any{"id": "dup", "baseRev": 0, "session": session("dup", "dup", 1)},
+			map[string]any{"id": "dup", "baseRev": 0, "session": session("dup", "dup", 1)},
+		},
+	}, nil); status != http.StatusBadRequest {
+		t.Fatalf("duplicate ids status=%d, want 400", status)
+	}
+	if status := doJSON(t, ts, "PUT", "/api/sessions/batch", alice, map[string]any{
+		"sessions": []any{map[string]any{"id": "../etc/passwd", "baseRev": 0, "session": session("x", "x", 1)}},
+	}, nil); status != http.StatusBadRequest {
+		t.Fatalf("invalid id status=%d, want 400", status)
+	}
+	if status := doJSON(t, ts, "PUT", "/api/sessions/batch", alice, map[string]any{
+		"sessions": []any{map[string]any{"id": "bp-1", "baseRev": 0}},
+	}, nil); status != http.StatusBadRequest {
+		t.Fatalf("missing session status=%d, want 400", status)
+	}
+	if status := doJSON(t, ts, "PUT", "/api/sessions/batch", "", map[string]any{
+		"sessions": []any{map[string]any{"id": "bp-1", "baseRev": 0, "session": session("bp-1", "x", 1)}},
+	}, nil); status != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated status=%d, want 401", status)
+	}
+}
+
+// 批量接口同样要遵守单条会话的体积上限，否则它可以绕过 SYNC_MAX_SESSION_BYTES。
+func TestBatchPutSessionsRespectsMaxSessionBytes(t *testing.T) {
+	ts, _ := testServerWithConfig(t, func(cfg *Config) {
+		cfg.MaxSessionBytes = 1024
+		cfg.MaxFileBytes = 1 << 20
+	})
+	token := registerUser(t, ts, "putbatchsize")
+
+	tooLarge := map[string]any{
+		"id": "big", "title": strings.Repeat("x", 2048), "createdAt": 1,
+		"updatedAt": 1, "messages": []any{},
+	}
+	status := doJSON(t, ts, "PUT", "/api/sessions/batch", token, map[string]any{
+		"sessions": []any{map[string]any{"id": "big", "baseRev": 0, "updatedAt": 1, "session": tooLarge}},
+	}, nil)
+	if status != http.StatusRequestEntityTooLarge {
+		t.Fatalf("oversized batch status=%d, want 413", status)
+	}
+}
+
+// 「删除所有对话」是服务端一次事务完成的整体清空：上千条历史不能变成上千次 DELETE，
+// 且每条墓碑必须拿到独立 rev，否则 /api/changes 翻页会在同一 rev 的中间被切断。
+func TestDeleteAllSessions(t *testing.T) {
+	ts, _ := testServer(t)
+	alice := registerUser(t, ts, "clearalice")
+	bob := registerUser(t, ts, "clearbob")
+
+	session := func(id string) map[string]any {
+		return map[string]any{
+			"id": id, "title": id, "createdAt": 1, "updatedAt": 1, "messages": []any{},
+		}
+	}
+	put := func(token, id string) {
+		if status := doJSON(t, ts, "PUT", "/api/session/"+id, token, map[string]any{
+			"baseRev": 0, "updatedAt": 1, "session": session(id),
+		}, nil); status != http.StatusOK {
+			t.Fatalf("put %s status=%d", id, status)
+		}
+	}
+	for _, id := range []string{"all-1", "all-2", "all-3"} {
+		put(alice, id)
+	}
+	put(bob, "all-1")
+
+	var before struct {
+		Rev int64 `json:"rev"`
+	}
+	doJSON(t, ts, "GET", "/api/state", alice, nil, &before)
+
+	var cleared struct {
+		Rev     int64 `json:"rev"`
+		Deleted int64 `json:"deleted"`
+	}
+	if status := doJSON(t, ts, "DELETE", "/api/sessions", alice, nil, &cleared); status != http.StatusOK {
+		t.Fatalf("delete all status=%d", status)
+	}
+	if cleared.Deleted != 3 || cleared.Rev != before.Rev+3 {
+		t.Fatalf("cleared = %+v, want deleted=3 rev=%d", cleared, before.Rev+3)
+	}
+
+	// 全部变成墓碑，云端会话数归零。
+	var state struct {
+		Rev      int64 `json:"rev"`
+		Sessions int64 `json:"sessions"`
+	}
+	doJSON(t, ts, "GET", "/api/state", alice, nil, &state)
+	if state.Sessions != 0 || state.Rev != cleared.Rev {
+		t.Fatalf("state = %+v", state)
+	}
+
+	// 逐页拉取必须能看到全部 3 条墓碑（验证每条墓碑有独立 rev）。
+	seen := map[string]bool{}
+	since := before.Rev
+	for page := 0; page < 10; page++ {
+		var changes changesResponse
+		status := doJSON(t, ts, "GET",
+			"/api/changes?since="+strconv.FormatInt(since, 10)+"&limit=2", alice, nil, &changes)
+		if status != http.StatusOK {
+			t.Fatalf("changes status=%d", status)
+		}
+		for _, item := range changes.Sessions {
+			if !item.Deleted {
+				t.Fatalf("change %s not deleted", item.ID)
+			}
+			seen[item.ID] = true
+		}
+		if !changes.HasMore {
+			break
+		}
+		since = changes.NextSince
+	}
+	if len(seen) != 3 {
+		t.Fatalf("pulled tombstones = %v, want all 3", seen)
+	}
+
+	// 再清一次：云端已空，不再推进游标、不广播。
+	var again struct {
+		Rev     int64 `json:"rev"`
+		Deleted int64 `json:"deleted"`
+	}
+	doJSON(t, ts, "DELETE", "/api/sessions", alice, nil, &again)
+	if again.Deleted != 0 || again.Rev != cleared.Rev {
+		t.Fatalf("second clear = %+v", again)
+	}
+
+	// 用户隔离：bob 的会话不受影响。
+	var bobState struct {
+		Sessions int64 `json:"sessions"`
+	}
+	doJSON(t, ts, "GET", "/api/state", bob, nil, &bobState)
+	if bobState.Sessions != 1 {
+		t.Fatalf("bob sessions = %d, want 1", bobState.Sessions)
+	}
+	if status := doJSON(t, ts, "DELETE", "/api/sessions", "", nil, nil); status != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated clear status=%d, want 401", status)
+	}
+}
+
 // 注册同样是 bcrypt 计算，必须与登录一样按 IP 限流。
 func TestRegisterRateLimited(t *testing.T) {
 	ts, _ := testServerWithConfig(t, func(cfg *Config) { cfg.LoginLimit = 3 })

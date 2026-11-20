@@ -11,7 +11,7 @@ import {
 import { syncLogin, syncLogout, syncState } from '../../services/sync/client.js'
 import { resetSyncMeta } from '../../services/sync/meta.js'
 import { syncNow } from '../../services/sync/engine.js'
-import { useSyncStatus } from '../../services/sync/status.js'
+import { syncProgressPercent, useSyncStatus } from '../../services/sync/status.js'
 import { Button } from '../base/Button.js'
 import { Modal } from '../base/Modal.js'
 import { showToast } from '../base/toastState.js'
@@ -135,11 +135,14 @@ export const SyncSettings = () => {
     switch (status.phase) {
       case 'disabled':
         return t('syncStatusDisabled')
-      case 'syncing':
-        // 首次同步上千条时会停留很久，直接显示队列规模，避免看起来「什么都没上传」。
-        return status.pending > 0
-          ? `${t('syncStatusSyncing')} · ${t('syncStatusPending', { count: status.pending })}`
-          : t('syncStatusSyncing')
+      case 'syncing': {
+        // 首次同步上千条时会停留很久：用上传百分比代替队列总数，进度会随每批完成前进。
+        // 只有拉取、没有待上传条目时百分比无意义，直接显示「正在同步」。
+        const percent = syncProgressPercent(status)
+        return percent === null
+          ? t('syncStatusSyncing')
+          : t('syncStatusSyncingPercent', { percent })
+      }
       case 'error':
         return t('syncStatusError')
       case 'authRequired':

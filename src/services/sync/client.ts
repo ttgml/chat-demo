@@ -1,5 +1,11 @@
 import { useSyncConfig } from './config.js'
-import { SyncError, type SyncChanges, type SyncErrorBody, type SyncSessionsBatch } from './types.js'
+import {
+  SyncError,
+  type SyncChanges,
+  type SyncErrorBody,
+  type SyncPutSessionsBatch,
+  type SyncSessionsBatch,
+} from './types.js'
 
 const REQUEST_TIMEOUT = 20_000
 /** 大附件在移动网络下可能远超普通 API 超时；32MB 按 2Mbps 上传就要两分钟。 */
@@ -170,10 +176,7 @@ export const syncGetSession = (id: string, signal?: AbortSignal) =>
  * 每次还要鉴权查一次数据库，所以服务端提供了批量接口。
  * 响应可能因 payload 总量超预算被截断（truncated），缺失的 id 由调用方回退单条接口。
  */
-export const syncGetSessions = (
-  ids: string[],
-  signal?: AbortSignal
-): Promise<SyncSessionsBatch> =>
+export const syncGetSessions = (ids: string[], signal?: AbortSignal): Promise<SyncSessionsBatch> =>
   jsonRequest<SyncSessionsBatch>(
     '/api/sessions/batch',
     {
@@ -199,12 +202,43 @@ export const syncPutSession = (
     signal
   )
 
+/**
+ * 批量上传会话（PUT /api/sessions/batch）。语义与单条 PUT 一致，只是把 N 次请求
+ * 合成一次：导入上千条历史时，逐条上传会让服务端做上千次鉴权查库和事务。
+ *
+ * body 由调用方按字节预算预先拼好（`{"sessions":[...]}`），避免同一份 payload
+ * 序列化两次。冲突不使整批失败，而是在 results 里逐条返回 serverRev/deleted。
+ */
+export const syncPutSessions = (
+  body: string,
+  signal?: AbortSignal
+): Promise<SyncPutSessionsBatch> =>
+  jsonRequest<SyncPutSessionsBatch>(
+    '/api/sessions/batch',
+    {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body,
+    },
+    signal
+  )
+
 export const syncDeleteSession = (id: string, baseRev: number, signal?: AbortSignal) =>
   jsonRequest<{ rev: number }>(
     `/api/session/${encodeURIComponent(id)}?baseRev=${encodeURIComponent(String(baseRev))}`,
     { method: 'DELETE' },
     signal
   )
+
+/**
+ * 清空当前账号在云端的全部会话（DELETE /api/sessions）。
+ * 「删除所有对话」用它取代逐条 DELETE：一次请求、一个事务、一次广播；
+ * 而且会连带删掉本机尚未拉取到的其它设备会话，不会在下一次 pull 里「复活」。
+ */
+export const syncDeleteAllSessions = (
+  signal?: AbortSignal
+): Promise<{ rev: number; deleted: number }> =>
+  jsonRequest<{ rev: number; deleted: number }>('/api/sessions', { method: 'DELETE' }, signal)
 
 export const syncPutFile = (id: string, blob: Blob, signal?: AbortSignal) =>
   jsonRequest<{ rev: number }>(

@@ -421,6 +421,184 @@ func (s *Server) handlePutSession(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"rev": newRev})
 }
 
+type putSessionsRequest struct {
+	Sessions []putBatchSession `json:"sessions"`
+}
+
+// putBatchSession 复用单条接口的请求体（嵌入字段被提升），只额外带一个 id。
+type putBatchSession struct {
+	ID string `json:"id"`
+	putSessionRequest
+}
+
+// putSessionResult 批量上传的单条结果。Conflict 为 true 时各字段语义与单条接口的 409 响应一致，
+// 客户端用它走同一套冲突解决逻辑；服务端不会因为部分冲突而拒绝整批。
+type putSessionResult struct {
+	ID        string `json:"id"`
+	Rev       int64  `json:"rev,omitempty"`
+	Conflict  bool   `json:"conflict,omitempty"`
+	ServerRev int64  `json:"serverRev,omitempty"`
+	Deleted   bool   `json:"deleted,omitempty"`
+}
+
+type putSessionsResponse struct {
+	Results []putSessionResult `json:"results"`
+}
+
+const (
+	// 一次批量上传的会话数上限，与批量拉取的上限保持同一量级。
+	maxPutBatchSessions = 100
+	// 单次批量上传的请求体预算。批量 body 是 N 条完整会话，与单条会话上限无关，
+	// 按总量单独限制；客户端会按字节预算切批，超过时退回逐条 PUT。
+	maxPutBatchBytes = 16 << 20
+)
+
+// handlePutSessions 批量上传会话（PUT /api/sessions/batch）。
+//
+// 语义与 PUT /api/session/{id} 完全一致：逐条 baseRev 乐观锁，墓碑默认拒绝覆盖。
+// 区别只在于整批共用一个事务：导入 1000 条历史时，逐条 PUT 意味着 1000 次
+// 鉴权查库 + 1000 个事务 + 1000 次广播；这里降成一次入库、一次广播。
+// 冲突不算整批失败：不冲突的会话照常落库，冲突项在 results 里带 serverRev/deleted，
+// 由客户端复用单条接口的冲突解决逻辑。
+func (s *Server) handlePutSessions(w http.ResponseWriter, r *http.Request) {
+	var body putSessionsRequest
+	if err := decodeJSON(r, &body); err != nil {
+		writeError(w, err)
+		return
+	}
+	if len(body.Sessions) == 0 || len(body.Sessions) > maxPutBatchSessions {
+		writeError(w, fail(http.StatusBadRequest, "invalid_sessions",
+			fmt.Sprintf("sessions must contain 1-%d entries", maxPutBatchSessions)))
+		return
+	}
+	ids := make([]string, 0, len(body.Sessions))
+	seen := make(map[string]bool, len(body.Sessions))
+	for _, item := range body.Sessions {
+		if !validID(item.ID) {
+			writeError(w, fail(http.StatusBadRequest, "invalid_id",
+				"id must be 1-128 chars of letters, digits, _ . -"))
+			return
+		}
+		if seen[item.ID] {
+			writeError(w, fail(http.StatusBadRequest, "duplicate_id", "session ids must be unique"))
+			return
+		}
+		seen[item.ID] = true
+		if item.BaseRev < 0 {
+			writeError(w, fail(http.StatusBadRequest, "invalid_base_rev", "baseRev must be a non-negative integer"))
+			return
+		}
+		if len(item.Session) == 0 || !json.Valid(item.Session) {
+			writeError(w, fail(http.StatusBadRequest, "invalid_session", "session must be valid JSON"))
+			return
+		}
+		if int64(len(item.Session)) > s.config.MaxSessionBytes {
+			writeError(w, errTooLarge)
+			return
+		}
+		ids = append(ids, item.ID)
+	}
+
+	userID := userFrom(r)
+	tx, err := s.db.Begin(r.Context())
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	defer tx.Rollback(r.Context())
+
+	// 与单条 PUT 一样，先递增 user_rev 拿到行锁再检查 baseRev，
+	// 否则并发的整批写入会同时读到旧版本号并双双通过乐观锁检查。
+	newRev, err := nextRevN(r.Context(), tx, userID, len(ids))
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+
+	// 一次取回已有的会话版本，避免逐条查询（1000 条就是 1000 次往返）。
+	rows, err := tx.Query(r.Context(),
+		`SELECT id, rev, deleted FROM sessions WHERE user_id = $1 AND id = ANY($2)`, userID, ids)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	type storedSession struct {
+		rev     int64
+		deleted bool
+	}
+	stored := make(map[string]storedSession, len(ids))
+	for rows.Next() {
+		var id string
+		var item storedSession
+		if err := rows.Scan(&id, &item.rev, &item.deleted); err != nil {
+			rows.Close()
+			writeError(w, err)
+			return
+		}
+		stored[id] = item
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		writeError(w, err)
+		return
+	}
+
+	type appliedSession struct {
+		putBatchSession
+		rev int64
+	}
+	firstRev := newRev - int64(len(ids)) + 1
+	results := make([]putSessionResult, 0, len(body.Sessions))
+	applied := make([]appliedSession, 0, len(body.Sessions))
+	for index, item := range body.Sessions {
+		// 未存储过的 id 取零值：rev=0、deleted=false，与单条 PUT 的判断完全一致。
+		current := stored[item.ID]
+		if current.rev != item.BaseRev || (current.deleted && !item.Revive) {
+			results = append(results, putSessionResult{
+				ID: item.ID, Conflict: true, ServerRev: current.rev, Deleted: current.deleted,
+			})
+			continue
+		}
+		applied = append(applied, appliedSession{putBatchSession: item, rev: firstRev + int64(index)})
+		results = append(results, putSessionResult{ID: item.ID, Rev: firstRev + int64(index)})
+	}
+
+	if len(applied) > 0 {
+		// 流水线提交所有写入：1000 条会话依然是 1 次往返，而不是 1000 次。
+		batch := &pgx.Batch{}
+		for _, item := range applied {
+			batch.Queue(`
+                INSERT INTO sessions (user_id, id, rev, updated_at, deleted, payload)
+                VALUES ($1, $2, $3, $4, FALSE, $5)
+                ON CONFLICT (user_id, id) DO UPDATE SET
+                    rev = EXCLUDED.rev, updated_at = EXCLUDED.updated_at,
+                    deleted = FALSE, payload = EXCLUDED.payload
+            `, userID, item.ID, item.rev, item.UpdatedAt, item.Session)
+		}
+		br := tx.SendBatch(r.Context(), batch)
+		for range applied {
+			if _, err := br.Exec(); err != nil {
+				br.Close()
+				writeError(w, err)
+				return
+			}
+		}
+		if err := br.Close(); err != nil {
+			writeError(w, err)
+			return
+		}
+	}
+	if err := tx.Commit(r.Context()); err != nil {
+		writeError(w, err)
+		return
+	}
+	if len(applied) > 0 {
+		// 一批只广播一次：其它设备收到后仍走增量拉取，不需要逐条通知。
+		s.notifyChange(userID, newRev)
+	}
+	writeJSON(w, http.StatusOK, putSessionsResponse{Results: results})
+}
+
 // handleDeleteSession 写墓碑而不是物理删除，保证其他设备能收到删除事件。
 func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
@@ -481,6 +659,79 @@ func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 	}
 	s.notifyChange(userID, newRev)
 	writeJSON(w, http.StatusOK, map[string]any{"rev": newRev})
+}
+
+// handleDeleteSessions 清空当前账号的全部会话（DELETE /api/sessions）。
+//
+// 「删除所有对话」原先由客户端为每个会话各发一次 DELETE /api/session/{id}：
+// 上千条历史就是上千次请求、上千个事务和上千次广播；而且只能删掉本机已知的会话，
+// 其它设备上传过、本机尚未拉到的会话会在下一次 pull 时「复活」。
+// 这里在一个事务里给全部会话写墓碑，一次广播，并能连带清掉本机没见过的会话。
+func (s *Server) handleDeleteSessions(w http.ResponseWriter, r *http.Request) {
+	userID := userFrom(r)
+	tx, err := s.db.Begin(r.Context())
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	defer tx.Rollback(r.Context())
+
+	// 先给 user_rev 行加锁（不递增），再统计要删的会话：其它写操作（PUT/DELETE/附件）
+	// 都先 nextRev，所以拿到锁之后它们插不进来，计数与随后的版本号预留才是稳定的。
+	if _, err := tx.Exec(r.Context(),
+		`UPDATE user_rev SET rev = rev WHERE user_id = $1`, userID,
+	); err != nil {
+		writeError(w, err)
+		return
+	}
+
+	var count int64
+	err = tx.QueryRow(r.Context(),
+		`SELECT count(*) FROM sessions WHERE user_id = $1 AND deleted = FALSE`, userID,
+	).Scan(&count)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	if count == 0 {
+		// 云端已经是空的：不推进游标、不广播，也不写任何东西。
+		rev, err := currentRevTx(r.Context(), tx, userID)
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"rev": rev, "deleted": 0})
+		return
+	}
+	// 一次把 count 个版本号全部预留：newRev 是本批最后一条墓碑的 rev。
+	newRev, err := nextRevN(r.Context(), tx, userID, int(count))
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+
+	// 每条墓碑拿一个独立的 rev：/api/changes 分页按 rev > since 推进，
+	// 若上千条共用一个 rev，翻页会在同一 rev 的中间被切断，后面的会话其它设备永远拉不到。
+	_, err = tx.Exec(r.Context(), `
+        WITH targets AS (
+            SELECT id, row_number() OVER (ORDER BY id) AS seq
+            FROM sessions WHERE user_id = $1 AND deleted = FALSE
+        )
+        INSERT INTO sessions (user_id, id, rev, updated_at, deleted, payload)
+        SELECT $1, id, $2 + seq - 1, 0, TRUE, NULL FROM targets
+        ON CONFLICT (user_id, id) DO UPDATE SET
+            rev = EXCLUDED.rev, deleted = TRUE, payload = NULL
+    `, userID, newRev-int64(count)+1)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	if err := tx.Commit(r.Context()); err != nil {
+		writeError(w, err)
+		return
+	}
+	s.notifyChange(userID, newRev)
+	writeJSON(w, http.StatusOK, map[string]any{"rev": newRev, "deleted": count})
 }
 
 // handlePutFile 附件按 file id 幂等覆盖；客户端上传前会先比对版本。

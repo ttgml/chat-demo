@@ -145,6 +145,33 @@ export const markFileUploaded = async (id: string, rev: number): Promise<void> =
   await (await getDB()).put('uploadedFiles', rev, id)
 }
 
+/**
+ * 批量提交上传结果：单事务写入会话新版本并按“发送时的队列时间”清理队列项。
+ *
+ * 队列里若已有更新的 updatedAt，说明请求飞行期间用户又改过这条会话：
+ * 不能删队列（否则这次编辑永远不会上传），但仍写入服务端版本，
+ * 下一轮 push 会以它为 baseRev 重传，不会误判成冲突。
+ */
+export const commitUploads = async (
+  revs: ReadonlyMap<string, number>,
+  sentAt: ReadonlyMap<string, number>
+): Promise<void> => {
+  if (revs.size === 0) {
+    return
+  }
+  const db = await getDB()
+  const tx = db.transaction(['sessionRev', 'pending'], 'readwrite')
+  const pending = tx.objectStore('pending')
+  for (const [id, rev] of revs) {
+    await tx.objectStore('sessionRev').put(rev, id)
+    const queued = await pending.get(id)
+    if (queued === undefined || queued.updatedAt <= (sentAt.get(id) ?? 0)) {
+      await pending.delete(id)
+    }
+  }
+  await tx.done
+}
+
 /** 已同步过的会话 id 列表，用于全量替换后的对账 */
 export const listSessionRevs = async (): Promise<Map<string, number>> => {
   const db = await getDB()

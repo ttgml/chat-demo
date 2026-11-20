@@ -120,6 +120,22 @@ func nextRev(ctx context.Context, tx pgx.Tx, userID string) (int64, error) {
 	return rev, err
 }
 
+// nextRevN 在事务内把用户版本号一次推进 n，返回推进后的值（本批最后一条可用的 rev）。
+// 批量上传用它替代 n 次 nextRev：既省掉 n 次往返，也让整批共用同一把行锁。
+// 冲突项浪费掉的版本号只会让游标出现空洞，而增量同步按 rev > since 取变更，空洞无影响。
+func nextRevN(ctx context.Context, tx pgx.Tx, userID string, n int) (int64, error) {
+	if n <= 0 {
+		return currentRevTx(ctx, tx, userID)
+	}
+	var rev int64
+	err := tx.QueryRow(ctx, `
+        INSERT INTO user_rev (user_id, rev) VALUES ($1, $2)
+        ON CONFLICT (user_id) DO UPDATE SET rev = user_rev.rev + $2
+        RETURNING rev
+    `, userID, int64(n)).Scan(&rev)
+	return rev, err
+}
+
 // currentRev 读取用户当前版本号；新用户视为 0。
 func currentRev(ctx context.Context, pool *pgxpool.Pool, userID string) (int64, error) {
 	var rev int64

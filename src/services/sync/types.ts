@@ -32,6 +32,24 @@ export type SyncSessionsBatch = {
   truncated?: boolean
 }
 
+/**
+ * PUT /api/sessions/batch 的单条结果。conflict 时字段与单条接口的 409 响应一致，
+ * 客户端用它走同一套冲突解决逻辑。
+ */
+export type SyncPutResult = {
+  id: string
+  /** 成功时该会话的新版本 */
+  rev?: number
+  conflict?: boolean
+  /** 冲突时服务端当前版本；为 0 时服务端会省略该字段 */
+  serverRev?: number
+  deleted?: boolean
+}
+
+export type SyncPutSessionsBatch = {
+  results: SyncPutResult[]
+}
+
 export type SessionChange = {
   id: string
   rev: number

@@ -10,18 +10,21 @@ import { showToast } from '../../components/base/toastState.js'
 import { clearSyncCredentials, syncAccountKey, syncReady, useSyncConfig } from './config.js'
 import {
   syncChanges,
+  syncDeleteAllSessions,
   syncDeleteSession,
   syncGetFile,
   syncGetSession,
   syncGetSessions,
   syncPutFile,
   syncPutSession,
+  syncPutSessions,
   syncState,
 } from './client.js'
 import {
   clearAllPending,
   clearPending,
   commitSyncProgress,
+  commitUploads,
   deleteSessionRev,
   getAccountKey,
   getLastSyncedRev,
@@ -40,7 +43,7 @@ import {
   type PendingItem,
 } from './meta.js'
 import { setSyncStatus, syncErrorKey, useSyncStatus } from './status.js'
-import { SyncError, type SyncSessionsBatch } from './types.js'
+import { SyncError, type SyncPutSessionsBatch, type SyncSessionsBatch } from './types.js'
 import { isSessionPayload, sessionFileIds } from './validate.js'
 import { createWatch, type WatchController } from './watch.js'
 
@@ -54,6 +57,12 @@ const WATCH_DEBOUNCE_MS = 200
 const PAGE_SIZE = 200
 /** 批量会话接口单次请求的 id 数（服务端上限 500，按页大小留足余量） */
 const BATCH_SIZE = 100
+/** 批量上传单次请求的会话数（服务端上限 100，留出余量） */
+const PUSH_BATCH_SIZE = 50
+/** 批量上传单次请求的会话 payload 字节预算，超出就切下一批 */
+const PUSH_BATCH_BYTES = 4 << 20
+/** 批量上传 / 整体删除等新接口不可用时（旧版服务端、网关拒绝）的回退状态码 */
+const FALLBACK_STATUS = new Set([400, 404, 405, 413, 415, 501])
 /** 失败后的重试退避上限 */
 const MAX_BACKOFF_MS = 60_000
 
@@ -203,66 +212,215 @@ const uploadSessionFiles = async (session: Session): Promise<void> => {
   }
 }
 
-/** 处理一条待上传变更；返回是否发生远端冲突 */
-const pushOne = async (item: PendingItem): Promise<boolean> => {
-  if (item.kind === 'delete') {
-    const baseRev = await getSessionRev(item.id)
-    if (baseRev === 0) {
-      // 从未上传成功的会话，无需写墓碑
-      await clearPending(item.id)
-      return false
-    }
-    try {
-      await syncDeleteSession(item.id, baseRev)
-      await deleteSessionRev(item.id)
-      // 不推进全局游标，理由见 adoptRemote
-      await clearPending(item.id)
-    } catch (error) {
-      if (!isConflict(error)) {
-        throw error
-      }
-      return resolveConflict(item.id, item, undefined)
-    }
-    return false
-  }
+type Upload = {
+  item: PendingItem
+  session: Session
+  baseRev: number
+  /** 预先序列化好的请求项，切批时直接按字节预算累加，不必重复序列化同一份 payload */
+  body: string
+  /** 已确认服务端是墓碑，需要显式复活（仅导入备份时用） */
+  revive?: true
+}
 
+/**
+ * 准备一条 upsert：读会话、上传附件原件、取 baseRev。
+ * 返回 null 表示本轮跳过（会话缺失已转墓碑，或仍在流式生成）。
+ */
+const prepareUpload = async (item: PendingItem): Promise<Upload | null> => {
   const session = await loadLocalSession(item.id)
   if (!session) {
     // 详情暂时读不到（全量替换事务未提交、缓存缺页）不等于会话被删除。
     // 只有内存列表里也确实没有该会话时，才允许转成墓碑。
     if (useChatStore.getState().sessions.some((summary) => summary.id === item.id)) {
-      return false
+      return null
     }
     await markPending({ id: item.id, kind: 'delete', updatedAt: item.updatedAt })
-    return false
+    return null
   }
   // 生成中的中间态不上传，保留队列等回复结束后的下一次通知
   if (Object.hasOwn(useChatStore.getState().streaming, item.id)) {
-    return false
+    return null
   }
   await uploadSessionFiles(session)
   const baseRev = await getSessionRev(item.id)
+  return {
+    item,
+    session,
+    baseRev,
+    body: JSON.stringify({ id: item.id, baseRev, updatedAt: session.updatedAt, session }),
+  }
+}
+
+/** 处理一次被服务端拒绝的上传（baseRev 不一致或服务端是墓碑）；返回是否算作冲突 */
+const handlePutConflict = async (
+  item: PendingItem,
+  session: Session,
+  serverRev: number | undefined,
+  deleted: boolean
+): Promise<boolean> => {
+  // 重新导入时云端往往是「删除全部」留下的墓碑：409 响应已带当前 rev 和 deleted，
+  // 直接显式复活即可，大批量导入时省掉上千次额外的 GET。
+  if (item.origin === 'import' && deleted && serverRev !== undefined) {
+    await reupload(item.id, serverRev, session, true)
+    return false
+  }
+  return resolveConflict(item.id, item, session)
+}
+
+/** 逐条上传一条会话；批量接口不可用时作为回退路径 */
+const putOne = async (upload: Upload): Promise<boolean> => {
+  const { item, session, baseRev, revive } = upload
   try {
     const { rev } = await syncPutSession(item.id, {
       baseRev,
       updatedAt: session.updatedAt,
       session,
+      ...(revive ? { revive: true } : {}),
     })
     // 只记录该会话的服务端版本；全局游标仍由 pull 按页推进，
     // pull 会通过 localRev >= change.rev 跳过自己刚上传的回环变更。
-    await setSessionRev(item.id, rev)
+    await commitUploads(new Map([[item.id, rev]]), new Map([[item.id, item.updatedAt]]))
+  } catch (error) {
+    if (!isConflict(error)) {
+      throw error
+    }
+    return handlePutConflict(item, session, error.serverRev, error.deleted === true)
+  }
+  return false
+}
+
+/**
+ * 把一条 409 的导入项改写成显式复活请求：baseRev 用服务端当前版本。
+ * 与 handlePutConflict 里的逐条 reupload 语义相同，只是把它攒成一批发出去。
+ */
+const revivalUpload = (upload: Upload, serverRev: number): Upload => ({
+  item: upload.item,
+  session: upload.session,
+  baseRev: serverRev,
+  revive: true,
+  body: JSON.stringify({
+    id: upload.item.id,
+    baseRev: serverRev,
+    updatedAt: upload.session.updatedAt,
+    session: upload.session,
+    revive: true,
+  }),
+})
+
+/**
+ * 批量上传一批会话，返回本批的冲突数。
+ * 1000 条历史逐条 PUT 就是 1000 次请求，每次都要鉴权查库 + 开事务 + 广播；
+ * 批量接口把它们压成十几批，服务端每批只做一个事务、一次广播。
+ */
+const pushBatch = async (uploads: readonly Upload[]): Promise<number> => {
+  if (uploads.length === 1) {
+    return (await putOne(uploads[0])) ? 1 : 0
+  }
+  let response: SyncPutSessionsBatch
+  try {
+    // 直接拼接预先序列化的请求项，避免把整批 payload 再序列化一次
+    response = await syncPutSessions(
+      `{"sessions":[${uploads.map((upload) => upload.body).join(',')}]}`
+    )
+  } catch (error) {
+    // 400/404/405/413/415/501：服务端还是旧版本，没有批量写入接口，
+    // 或这批被网关/体积上限拒绝。退回逐条 PUT，不让同步整体卡死。
+    if (error instanceof SyncError && FALLBACK_STATUS.has(error.status)) {
+      let conflicts = 0
+      for (const upload of uploads) {
+        if (await putOne(upload)) {
+          conflicts += 1
+        }
+      }
+      return conflicts
+    }
+    throw error
+  }
+  const results = new Map(response.results.map((result) => [result.id, result]))
+  const revs = new Map<string, number>()
+  const sentAt = new Map<string, number>()
+  /** 导入覆盖云端墓碑的条目：攒成下一批带 revive 重传 */
+  const revivals: Upload[] = []
+  let conflicts = 0
+  for (const upload of uploads) {
+    const result = results.get(upload.item.id)
+    // 服务端没返回这一条：保留队列，下一轮对账再传
+    if (!result) {
+      continue
+    }
+    try {
+      if (result.conflict) {
+        const { item, session } = upload
+        if (
+          upload.revive !== true &&
+          item.origin === 'import' &&
+          result.deleted &&
+          result.serverRev !== undefined
+        ) {
+          // 重新导入时云端往往全是「删除全部」留下的墓碑。若逐条 reupload，
+          // 上千条导入会在 409 之后又变成上千次请求，这里整批复活。
+          revivals.push(revivalUpload(upload, result.serverRev))
+        } else if (
+          await handlePutConflict(item, session, result.serverRev, result.deleted === true)
+        ) {
+          conflicts += 1
+        }
+      } else if (typeof result.rev === 'number') {
+        revs.set(upload.item.id, result.rev)
+        sentAt.set(upload.item.id, upload.item.updatedAt)
+      }
+    } catch (error) {
+      // 单条冲突解决失败不影响同一批的其它会话
+      if (isUnauthorized(error) || isNetwork(error)) {
+        throw error
+      }
+      setSyncStatus({ errorKey: syncErrorKey(error) })
+    }
+  }
+  await commitUploads(revs, sentAt)
+  // 复活本身也是一次批量上传：走了 revive 的条目不会再被收集，不会无限递归。
+  for (let index = 0; index < revivals.length; index += PUSH_BATCH_SIZE) {
+    conflicts += await pushBatch(revivals.slice(index, index + PUSH_BATCH_SIZE))
+  }
+  return conflicts
+}
+
+/**
+ * 「删除所有对话」：让服务端一条请求清空云端。
+ * 逐条 DELETE 在上千条历史时就是上千次请求，而且只删得掉本机已知的会话；
+ * 整体清空还能连带删掉其它设备上传过、本机尚未拉取到的会话。
+ * 返回 false 表示服务端没有这个接口（旧版镜像），由调用方退回逐条墓碑。
+ */
+const deleteAllRemote = async (): Promise<boolean> => {
+  try {
+    await syncDeleteAllSessions()
+    return true
+  } catch (error) {
+    if (error instanceof SyncError && FALLBACK_STATUS.has(error.status)) {
+      return false
+    }
+    throw error
+  }
+}
+
+/** 上传一条删除墓碑；返回是否发生远端冲突 */
+const pushDelete = async (item: PendingItem): Promise<boolean> => {
+  const baseRev = await getSessionRev(item.id)
+  if (baseRev === 0) {
+    // 从未上传成功的会话，无需写墓碑
+    await clearPending(item.id)
+    return false
+  }
+  try {
+    await syncDeleteSession(item.id, baseRev)
+    await deleteSessionRev(item.id)
+    // 不推进全局游标，理由见 adoptRemote
     await clearPending(item.id)
   } catch (error) {
     if (!isConflict(error)) {
       throw error
     }
-    // 重新导入时云端往往是「删除全部」留下的墓碑：409 响应已带当前 rev 和 deleted，
-    // 直接显式复活即可，大批量导入时省掉上千次额外的 GET。
-    if (item.origin === 'import' && error.deleted && error.serverRev !== undefined) {
-      await reupload(item.id, error.serverRev, session, true)
-      return false
-    }
-    return resolveConflict(item.id, item, session)
+    return resolveConflict(item.id, item, undefined)
   }
   return false
 }
@@ -277,12 +435,53 @@ const push = async (): Promise<number> => {
       break
     }
     let advanced = false
+    let batch: Upload[] = []
+    let bytes = 0
+    const flush = async () => {
+      if (batch.length === 0) {
+        return
+      }
+      const uploads = batch
+      batch = []
+      bytes = 0
+      try {
+        conflicts += await pushBatch(uploads)
+        advanced = true
+        // 每批完成后刷新队列规模，让设置页的百分比跟着前进（不是等全部传完才变）
+        await updatePendingCount()
+      } catch (error) {
+        if (isUnauthorized(error) || isNetwork(error)) {
+          throw error
+        }
+        // 单批失败不阻塞其它会话；保留队列，由外层重试
+        setSyncStatus({ errorKey: syncErrorKey(error) })
+      }
+    }
     for (const item of items) {
       try {
-        if (await pushOne(item)) {
-          conflicts += 1
+        if (item.kind === 'delete') {
+          // 删除要按单条语义立即执行，先把已攒的 upsert 发出去保持顺序
+          await flush()
+          if (await pushDelete(item)) {
+            conflicts += 1
+          }
+          advanced = true
+          await updatePendingCount()
+          continue
         }
-        advanced = true
+        const upload = await prepareUpload(item)
+        if (!upload) {
+          continue
+        }
+        // 按条数与字节预算切批；单条就超预算时单独成批，由服务端的单条上限兜底
+        if (batch.length > 0 && bytes + upload.body.length > PUSH_BATCH_BYTES) {
+          await flush()
+        }
+        batch.push(upload)
+        bytes += upload.body.length
+        if (batch.length >= PUSH_BATCH_SIZE) {
+          await flush()
+        }
       } catch (error) {
         if (isUnauthorized(error) || isNetwork(error)) {
           throw error
@@ -291,6 +490,7 @@ const push = async (): Promise<number> => {
         setSyncStatus({ errorKey: syncErrorKey(error) })
       }
     }
+    await flush()
     if (!advanced) {
       break
     }
@@ -627,7 +827,8 @@ const syncOnce = async (): Promise<void> => {
       backfilled = true
     }
     // 先把队列规模反映到设置页，避免首次上传上千条时一直显示「已同步 / 0 组对话」。
-    await updatePendingCount()
+    // 这个数量也是本轮同步进度百分比的分母，push 会随着每批完成把 pending 推小。
+    setSyncStatus({ pendingTotal: await updatePendingCount() })
     const pushConflicts = await push()
     const pullResult = await pull()
     let conflicts = pushConflicts + pullResult.overwritten
@@ -643,6 +844,7 @@ const syncOnce = async (): Promise<void> => {
       phase: 'idle',
       lastSyncedAt: Date.now(),
       pending: pending.length,
+      pendingTotal: 0,
       errorKey: null,
       conflictCount: conflicts,
     })
@@ -653,15 +855,20 @@ const syncOnce = async (): Promise<void> => {
       setSyncStatus({ phase: 'authRequired', errorKey: 'syncErrorAuth' })
       return
     }
-    setSyncStatus({ phase: 'error', errorKey: syncErrorKey(error) })
+    setSyncStatus({ phase: 'error', errorKey: syncErrorKey(error), pendingTotal: 0 })
     scheduleRetry()
   }
 }
 
-const updatePendingCount = () =>
-  listPending()
-    .then((items) => setSyncStatus({ pending: items.length }))
-    .catch(() => {})
+const updatePendingCount = async (): Promise<number> => {
+  try {
+    const items = await listPending()
+    setSyncStatus({ pending: items.length })
+    return items.length
+  } catch {
+    return 0
+  }
+}
 
 const scheduleRetry = () => {
   if (stopped || retryTimer) {
@@ -725,6 +932,23 @@ const handleChange = (event: ChatChangeEvent) => {
     }
     const fromImport = event.reason === 'import'
     void enqueue(async () => {
+      if (!fromImport) {
+        // 「删除所有对话」：优先用服务端的整体清空接口，避免上千条会话变成上千次 DELETE。
+        try {
+          if (await deleteAllRemote()) {
+            // 删除前的编辑意图已经过期，队列里残留的条目不能再上传，否则会把会话重建回来
+            await clearAllPending()
+            await updatePendingCount()
+            if (syncReady(useSyncConfig.getState())) {
+              await syncOnce()
+            }
+            return
+          }
+        } catch (error) {
+          // 请求失败（网络/5xx）：退回逐条墓碑，由本地队列负责重试
+          setSyncStatus({ errorKey: syncErrorKey(error) })
+        }
+      }
       await reconcile(fromImport ? { resetPending: true, tombstones: false, origin: 'import' } : {})
       if (syncReady(useSyncConfig.getState())) {
         await syncOnce()

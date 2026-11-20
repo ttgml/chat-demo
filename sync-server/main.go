@@ -77,6 +77,17 @@ func routes(srv *Server, cfg Config) http.Handler {
 	}
 	mux := http.NewServeMux()
 
+	// 全局上限取两者较大值并留出封装开销；各 handler 内再做自己的精确限额。
+	globalLimit := cfg.MaxSessionBytes
+	if cfg.MaxFileBytes > globalLimit {
+		globalLimit = cfg.MaxFileBytes
+	}
+	// 批量上传的 body 是多条完整会话，按总量单独限，但不超过全局上限。
+	putBatchLimit := int64(maxPutBatchBytes)
+	if putBatchLimit > globalLimit {
+		putBatchLimit = globalLimit
+	}
+
 	// 公开接口：注册、登录。
 	// 单独限 body 大小：全局上限是按附件尺寸算的（几十 MB），
 	// 不能拿它去解析只用几十字节的凭据，否则匿名请求就能让服务端解析超大 JSON。
@@ -95,8 +106,13 @@ func routes(srv *Server, cfg Config) http.Handler {
 	mux.Handle("GET /api/session/{id}", authOnly(http.HandlerFunc(srv.handleGetSession)))
 	// 批量拉取：客户端一次同步最多要取一页（≤200）个会话，逐条 GET 会放大成数百次请求。
 	mux.Handle("POST /api/sessions/batch", authOnly(http.HandlerFunc(srv.handleGetSessions)))
+	// 批量上传：与批量拉取对称。导入上千条历史时逐条 PUT 要鉴权查库 + 开事务上千次。
+	mux.Handle("PUT /api/sessions/batch",
+		maxBytes(putBatchLimit, authOnly(http.HandlerFunc(srv.handlePutSessions))))
 	mux.Handle("PUT /api/session/{id}", authOnly(http.HandlerFunc(srv.handlePutSession)))
 	mux.Handle("DELETE /api/session/{id}", authOnly(http.HandlerFunc(srv.handleDeleteSession)))
+	// 整体清空：客户端「删除所有对话」一次请求搞定，不必逐条 DELETE（上千条历史时上千次请求）。
+	mux.Handle("DELETE /api/sessions", authOnly(http.HandlerFunc(srv.handleDeleteSessions)))
 	mux.Handle("PUT /api/file/{id}", authOnly(http.HandlerFunc(srv.handlePutFile)))
 	mux.Handle("GET /api/file/{id}", authOnly(http.HandlerFunc(srv.handleGetFile)))
 
@@ -106,10 +122,6 @@ func routes(srv *Server, cfg Config) http.Handler {
 	})
 
 	// 全局上限取两者较大值并留出封装开销；各 handler 内再做自己的精确限额。
-	globalLimit := cfg.MaxSessionBytes
-	if cfg.MaxFileBytes > globalLimit {
-		globalLimit = cfg.MaxFileBytes
-	}
 	var handler http.Handler = mux
 	handler = compressJSON(handler)
 	handler = maxBytes(globalLimit+(1<<20), handler)
