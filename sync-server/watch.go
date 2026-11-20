@@ -208,13 +208,17 @@ func (c *watchClient) writeLoop(started time.Time) {
 // 因此必须在握手阶段自己拒绝未知来源；鉴权仍完全依赖首帧 token，不使用 cookie，
 // 所以 file:// 页面（Origin: null）与非浏览器客户端（无 Origin）可以放行。
 func watchCheckOrigin(allowed []string) func(*http.Request) bool {
+	allowAll := allowAllOrigins(allowed)
 	set := make(map[string]bool, len(allowed))
 	for _, origin := range allowed {
-		set[strings.ToLower(strings.TrimRight(strings.TrimSpace(origin), "/"))] = true
+		set[normalizeOrigin(origin)] = true
 	}
 	return func(r *http.Request) bool {
 		origin := r.Header.Get("Origin")
 		if origin == "" || origin == "null" {
+			return true
+		}
+		if allowAll {
 			return true
 		}
 		parsed, err := url.Parse(origin)
@@ -224,7 +228,7 @@ func watchCheckOrigin(allowed []string) func(*http.Request) bool {
 		if strings.EqualFold(parsed.Host, r.Host) {
 			return true
 		}
-		return set[strings.ToLower(origin)]
+		return set[normalizeOrigin(origin)]
 	}
 }
 

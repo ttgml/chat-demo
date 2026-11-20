@@ -10,16 +10,37 @@ type contextKey string
 
 const userIDKey contextKey = "userID"
 
+// wildcardOrigin 表示允许任意来源。带凭证的跨域请求不允许把 Access-Control-Allow-Origin
+// 设为字面量 "*"，因此命中通配时回显请求里的 Origin。
+const wildcardOrigin = "*"
+
+// allowAllOrigins 判断白名单里是否配置了 "*"。
+func allowAllOrigins(allowed []string) bool {
+	for _, origin := range allowed {
+		if strings.TrimSpace(origin) == wildcardOrigin {
+			return true
+		}
+	}
+	return false
+}
+
+// normalizeOrigin 统一来源比较口径：忽略大小写、首尾空白与末尾斜杠。
+func normalizeOrigin(origin string) string {
+	return strings.ToLower(strings.TrimRight(strings.TrimSpace(origin), "/"))
+}
+
 // cors 只允许配置中的来源；未配置时禁止跨域，避免默认放开带来的风险。
+// 配置 "*" 时允许任意来源，但仍回显实际 Origin 而不是 "*"。
 func cors(allowed []string, requireHTTPS bool) func(http.Handler) http.Handler {
+	allowAll := allowAllOrigins(allowed)
 	set := make(map[string]bool, len(allowed))
 	for _, origin := range allowed {
-		set[origin] = true
+		set[normalizeOrigin(origin)] = true
 	}
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			origin := r.Header.Get("Origin")
-			if origin != "" && set[origin] {
+			if origin != "" && (allowAll || set[normalizeOrigin(origin)]) {
 				w.Header().Set("Access-Control-Allow-Origin", origin)
 				w.Header().Set("Vary", "Origin")
 				w.Header().Set("Access-Control-Allow-Credentials", "true")

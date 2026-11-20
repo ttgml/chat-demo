@@ -235,3 +235,26 @@ func TestWatchLogoutDisconnectsToken(t *testing.T) {
 		t.Fatal("watch connection should close after logout")
 	}
 }
+
+func TestWatchOriginWildcard(t *testing.T) {
+	check := watchCheckOrigin([]string{"*"})
+	for _, tc := range []struct {
+		name, origin, host string
+		want               bool
+	}{
+		{"any origin", "https://any.example.com", "sync.example.com", true},
+		{"localhost", "http://localhost:8090", "sync.example.com", true},
+		{"null", "null", "sync.example.com", true},
+		{"no origin", "", "sync.example.com", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := &http.Request{Host: tc.host, Header: http.Header{}}
+			if tc.origin != "" {
+				req.Header.Set("Origin", tc.origin)
+			}
+			if got := check(req); got != tc.want {
+				t.Fatalf("origin %q: got %v want %v", tc.origin, got, tc.want)
+			}
+		})
+	}
+}

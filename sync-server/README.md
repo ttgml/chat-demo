@@ -71,7 +71,7 @@ cd .. && pnpm dev
 
 1. `curl -s -o /dev/null -w '%{http_code}\n' http://localhost:8080/api/watch`：
    `400` 表示端点存在（不带 Upgrade 头属正常），`404` 表示跑的是旧镜像，重新执行 `docker compose up -d --build`。
-2. `SYNC_ALLOWED_ORIGINS` 要与浏览器地址栏的 origin **完全一致**；`http://localhost:8090` 与 `http://127.0.0.1:8090` 是两个不同来源，不匹配时握手返回 `403`。
+2. `SYNC_ALLOWED_ORIGINS` 要与浏览器地址栏的 origin **完全一致**（除非配置为 `*`）；`http://localhost:8090` 与 `http://127.0.0.1:8090` 是两个不同来源，不匹配时握手返回 `403`。
 3. 浏览器控制台看 WebSocket 握手状态码；公网部署还要确认反向代理放行 Upgrade，并把该路径读超时设到 70 秒以上。
 
 ## 配置项
@@ -80,7 +80,7 @@ cd .. && pnpm dev
 |---|---|---|
 | `SYNC_DATABASE_URL` | 必填 | Postgres 连接串 |
 | `SYNC_ADDR` | `:8080` | 监听地址 |
-| `SYNC_ALLOWED_ORIGINS` | 空（禁跨域） | 允许的前端来源，逗号分隔 |
+| `SYNC_ALLOWED_ORIGINS` | 空（禁跨域） | 允许的前端来源，逗号分隔；`*` 表示允许任意来源 |
 | `SYNC_REQUIRE_HTTPS` | `false` | 附加 HSTS 头 |
 | `SYNC_TOKEN_TTL` | `720h` | 登录 token 有效期 |
 | `SYNC_MAX_SESSION_BYTES` | `8388608` | 单个会话 JSON 上限 |
@@ -304,7 +304,7 @@ SYNC_TEST_DATABASE_URL='postgres://chatsync:chatsync@localhost:5432/chatsync?ssl
 ## 安全与运维注意事项
 
 - **自部署走 HTTP 时，用户名密码和聊天记录是明文传输的**。局域网内也有风险，公网部署务必在前面挂 HTTPS 反代并设置 `SYNC_REQUIRE_HTTPS=true`。
-- `SYNC_ALLOWED_ORIGINS` 必须精确列出前端来源。跨域带凭证不允许通配 `*`，配置错误会直接导致浏览器预检失败；WebSocket 握手也按同一份白名单校验 `Origin`。
+- `SYNC_ALLOWED_ORIGINS` 建议精确列出前端来源；配置为 `*` 时允许任意来源，但带凭证的跨域请求仍会回显实际 `Origin`（而不是字面量 `*`）。来源比较忽略大小写与末尾斜杠；WebSocket 握手也按同一份白名单校验 `Origin`。
 - 反向代理必须放行 WebSocket Upgrade（`Connection: Upgrade` / `Upgrade: websocket`），并把该路径的读超时设到 70 秒以上；否则前端会自动退回定时同步。
 - `/api/watch` 受进程内连接总数上限（2048，含未认证连接）保护；公网部署仍建议在网关层按 IP 限制并发长连接。
 - 登录与注册限流目前是**进程内**计数（两者各自独立）；多实例托管时需要在网关层再做一层全局限流。
