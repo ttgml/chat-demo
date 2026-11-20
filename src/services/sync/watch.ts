@@ -1,4 +1,5 @@
 import { syncReady, type SyncConfig } from './config.js'
+import { syncClientId } from './identity.js'
 import { setSyncStatus, type WatchPhase } from './status.js'
 
 /** 握手超时：代理不支持 Upgrade 时浏览器可能迟迟不触发 onclose */
@@ -219,7 +220,8 @@ export const createWatch = (callbacks: WatchCallbacks): WatchController => {
       handshakeTimer = 0
       lastMessageAt = Date.now()
       try {
-        ws.send(JSON.stringify({ type: 'auth', token: current.token }))
+        // clientId 让服务端在广播时跳过本页面自己写入的变更。
+        ws.send(JSON.stringify({ type: 'auth', token: current.token, clientId: syncClientId }))
       } catch {
         ws.close()
         return

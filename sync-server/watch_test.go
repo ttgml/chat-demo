@@ -45,7 +45,7 @@ func TestWatchHubIsolation(t *testing.T) {
 		t.Fatalf("unexpected subscriber counts: %d / %d", hub.count("alice"), hub.count("bob"))
 	}
 
-	hub.notify("alice", 7)
+	hub.notify("alice", 7, "")
 	msg := readWatchMessage(t, alice)
 	if msg.Type != "changed" || msg.Rev != 7 {
 		t.Fatalf("alice got %+v", msg)
@@ -60,7 +60,7 @@ func TestWatchHubIsolation(t *testing.T) {
 	if hub.count("bob") != 0 {
 		t.Fatal("bob should have no subscribers after remove")
 	}
-	hub.notify("bob", 8) // 空集合不应 panic
+	hub.notify("bob", 8, "") // 空集合不应 panic
 
 	hub.disconnectToken("hash-a")
 	select {
@@ -128,12 +128,20 @@ func TestWatchOrigin(t *testing.T) {
 // dialWatch 建立并认证一条订阅连接，返回 ready 消息。
 func dialWatch(t *testing.T, baseURL, token string) (*websocket.Conn, watchMessage) {
 	t.Helper()
+	return dialWatchWithClientID(t, baseURL, token, "")
+}
+
+// dialWatchWithClientID 额外上报客户端标识，模拟新版前端页面实例。
+func dialWatchWithClientID(
+	t *testing.T, baseURL, token, clientID string,
+) (*websocket.Conn, watchMessage) {
+	t.Helper()
 	conn, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(baseURL, "http")+"/api/watch", nil)
 	if err != nil {
 		t.Fatalf("dial watch: %v", err)
 	}
 	t.Cleanup(func() { _ = conn.Close() })
-	if err := conn.WriteJSON(watchMessage{Type: "auth", Token: token}); err != nil {
+	if err := conn.WriteJSON(watchMessage{Type: "auth", Token: token, ClientID: clientID}); err != nil {
 		t.Fatalf("send auth: %v", err)
 	}
 	msg := readJSONWatch(t, conn, 3*time.Second)
@@ -257,4 +265,119 @@ func TestWatchOriginWildcard(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestWatchHubSkipsWritingClient(t *testing.T) {
+	hub := newWatchHub()
+	origin := testClient("alice", "hash-a")
+	origin.clientID = "tab-a"
+	other := testClient("alice", "hash-b")
+	other.clientID = "tab-b"
+	hub.add(origin)
+	hub.add(other)
+
+	// 写入方自己不该收到回环通知，同账号的其它连接照常收到。
+	hub.notify("alice", 9, "tab-a")
+	msg := readWatchMessage(t, other)
+	if msg.Type != "changed" || msg.Rev != 9 {
+		t.Fatalf("other tab got %+v", msg)
+	}
+	select {
+	case data := <-origin.send:
+		t.Fatalf("writing client must not receive its own change, got %s", data)
+	default:
+	}
+
+	// 未知来源（空 from）时广播给所有连接，兼容未升级的客户端。
+	hub.notify("alice", 10, "")
+	for _, c := range []*watchClient{origin, other} {
+		if msg := readWatchMessage(t, c); msg.Rev != 10 {
+			t.Fatalf("client got %+v", msg)
+		}
+	}
+}
+
+func TestNormalizeClientID(t *testing.T) {
+	cases := map[string]string{
+		"tab-1":                 "tab-1",
+		"  a_b.c-D  ":           "a_b.c-D",
+		"":                      "",
+		"bad id":                "",
+		"x":                     "x",
+		strings.Repeat("a", 65): "",
+		strings.Repeat("a", 64): strings.Repeat("a", 64),
+	}
+	for input, want := range cases {
+		if got := normalizeClientID(input); got != want {
+			t.Fatalf("normalize %q: got %q want %q", input, got, want)
+		}
+	}
+}
+
+// expectNoWatchMessage 断言连接在短暂等待内收不到消息。
+func expectNoWatchMessage(t *testing.T, conn *websocket.Conn) {
+	t.Helper()
+	if err := conn.SetReadDeadline(time.Now().Add(300 * time.Millisecond)); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := conn.ReadMessage(); err == nil {
+		t.Fatal("connection should not receive a message")
+	} else if netErr, ok := err.(interface{ Timeout() bool }); !ok || !netErr.Timeout() {
+		t.Fatalf("expected read timeout, got %v", err)
+	}
+}
+
+// TestWatchSkipsOwnWrites 验证写入方不会收到自己写入产生的 changed 通知，
+// 而同账号的其它页面/设备（不同 clientId）以及未上报 clientId 的旧客户端仍会收到。
+func TestWatchSkipsOwnWrites(t *testing.T) {
+	ts, baseURL := testServer(t)
+	alice := registerUser(t, ts, "watchself")
+
+	writer, ready := dialWatchWithClientID(t, baseURL, alice, "tab-a")
+	if ready.Type != "ready" {
+		t.Fatalf("expected ready, got %+v", ready)
+	}
+	other, otherReady := dialWatchWithClientID(t, baseURL, alice, "tab-b")
+	if otherReady.Type != "ready" {
+		t.Fatalf("expected ready for other tab, got %+v", otherReady)
+	}
+	legacy, legacyReady := dialWatch(t, baseURL, alice)
+	if legacyReady.Type != "ready" {
+		t.Fatalf("expected ready for legacy client, got %+v", legacyReady)
+	}
+
+	var put struct {
+		Rev int64 `json:"rev"`
+	}
+	status := doJSONWithClientID(t, ts, "PUT", "/api/session/watch-self-1", alice, "tab-a", map[string]any{
+		"baseRev": 0, "updatedAt": 1000, "session": map[string]any{"id": "watch-self-1"},
+	}, &put)
+	if status != 200 {
+		t.Fatalf("put session status=%d", status)
+	}
+	for _, conn := range []*websocket.Conn{other, legacy} {
+		msg := readJSONWatch(t, conn, 3*time.Second)
+		if msg.Type != "changed" || msg.Rev != put.Rev {
+			t.Fatalf("expected changed rev=%d, got %+v", put.Rev, msg)
+		}
+	}
+	firstRev := put.Rev
+
+	// 另一个页面写入时，本页面应当收到通知；若收到的是上一批自己的回环，
+	// 这里的 rev 会对不上（读超时会让连接不可复用，所以「收不到」放到最后断言）。
+	status = doJSONWithClientID(t, ts, "PUT", "/api/session/watch-self-2", alice, "tab-b", map[string]any{
+		"baseRev": 0, "updatedAt": 1001, "session": map[string]any{"id": "watch-self-2"},
+	}, &put)
+	if status != 200 {
+		t.Fatalf("put session status=%d", status)
+	}
+	if put.Rev == firstRev {
+		t.Fatalf("expected a new rev, got %d", put.Rev)
+	}
+	msg := readJSONWatch(t, writer, 3*time.Second)
+	if msg.Type != "changed" || msg.Rev != put.Rev {
+		t.Fatalf("expected changed rev=%d, got %+v", put.Rev, msg)
+	}
+	// 写入方不应再有第二条积压消息（也就是自己那次写入的回环）。
+	expectNoWatchMessage(t, writer)
 }

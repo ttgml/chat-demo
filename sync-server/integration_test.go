@@ -67,6 +67,14 @@ func testServerWithConfig(t *testing.T, mutate func(*Config)) (*httptest.Server,
 
 func doJSON(t *testing.T, ts *httptest.Server, method, path, token string, body any, target any) int {
 	t.Helper()
+	return doJSONWithClientID(t, ts, method, path, token, "", body, target)
+}
+
+// doJSONWithClientID 额外带上客户端标识，用于验证服务端不会把变更推回写入方自己。
+func doJSONWithClientID(
+	t *testing.T, ts *httptest.Server, method, path, token, clientID string, body any, target any,
+) int {
+	t.Helper()
 	var reader io.Reader
 	if body != nil {
 		data, err := json.Marshal(body)
@@ -84,6 +92,9 @@ func doJSON(t *testing.T, ts *httptest.Server, method, path, token string, body 
 	}
 	if token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	if clientID != "" {
+		req.Header.Set(clientIDHeader, clientID)
 	}
 	resp, err := ts.Client().Do(req)
 	if err != nil {

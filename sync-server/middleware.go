@@ -14,6 +14,31 @@ const userIDKey contextKey = "userID"
 // 设为字面量 "*"，因此命中通配时回显请求里的 Origin。
 const wildcardOrigin = "*"
 
+// clientIDHeader 由客户端在每个请求上携带，取值是当前页面实例的随机标识。
+// 服务端用它跳过向写入方本人回推变更通知，避免自己上传的回环触发额外同步。
+const clientIDHeader = "X-Sync-Client-Id"
+
+// normalizeClientID 校验并归一化客户端标识。非法或缺失一律返回空串，
+// 表示「未知来源」，此时广播不会跳过任何连接。
+func normalizeClientID(raw string) string {
+	id := strings.TrimSpace(raw)
+	if id == "" || len(id) > 64 {
+		return ""
+	}
+	for _, ch := range id {
+		valid := ch >= 'a' && ch <= 'z' || ch >= 'A' && ch <= 'Z' ||
+			ch >= '0' && ch <= '9' || ch == '-' || ch == '_' || ch == '.'
+		if !valid {
+			return ""
+		}
+	}
+	return id
+}
+
+func clientIDOf(r *http.Request) string {
+	return normalizeClientID(r.Header.Get(clientIDHeader))
+}
+
 // allowAllOrigins 判断白名单里是否配置了 "*"。
 func allowAllOrigins(allowed []string) bool {
 	for _, origin := range allowed {
@@ -45,7 +70,7 @@ func cors(allowed []string, requireHTTPS bool) func(http.Handler) http.Handler {
 				w.Header().Set("Vary", "Origin")
 				w.Header().Set("Access-Control-Allow-Credentials", "true")
 				w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-				w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
+				w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, "+clientIDHeader)
 				w.Header().Set("Access-Control-Expose-Headers", "Content-Type, Content-Length")
 				w.Header().Set("Access-Control-Max-Age", "600")
 				if requireHTTPS {

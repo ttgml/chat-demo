@@ -1,4 +1,5 @@
 import { useSyncConfig } from './config.js'
+import { syncClientId } from './identity.js'
 import {
   SyncError,
   type SyncChanges,
@@ -63,6 +64,8 @@ const request = async (
   if (auth) {
     requestHeaders.set('Authorization', `Bearer ${tokenOf()}`)
   }
+  // 服务端据此不把这次写入产生的变更再推回本页面，避免自己触发额外同步。
+  requestHeaders.set('X-Sync-Client-Id', syncClientId)
   try {
     const response = await fetch(`${baseUrl()}${path}`, {
       ...rest,

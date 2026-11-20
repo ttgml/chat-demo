@@ -39,6 +39,8 @@ type watchMessage struct {
 	Type  string `json:"type"`
 	Rev   int64  `json:"rev,omitempty"`
 	Token string `json:"token,omitempty"`
+	// ClientID 由客户端在首帧认证时上报；服务端据此跳过向写入方回推自己的变更。
+	ClientID string `json:"clientId,omitempty"`
 }
 
 // ready / changed 必须带 rev，即使新账号的游标是 0 也不能省略。
@@ -79,6 +81,7 @@ type watchClient struct {
 	conn      *websocket.Conn
 	userID    string
 	tokenHash string
+	clientID  string
 	send      chan []byte
 	done      chan struct{}
 	closeOnce sync.Once
@@ -148,13 +151,16 @@ func (h *watchHub) each(fn func(*watchClient)) {
 	}
 }
 
-// notify 只发给同一账号的连接。缓冲已满说明客户端严重滞后，直接断开：
-// 它重连时会收到 ready 并补做一次同步，不会丢数据。
-func (h *watchHub) notify(userID string, rev int64) {
+// notify 只发给同一账号的连接，并跳过发起本次写入的连接（from 非空时）。
+// 缓冲已满说明客户端严重滞后，直接断开：它重连时会收到 ready 并补做一次同步，不会丢数据。
+func (h *watchHub) notify(userID string, rev int64, from string) {
 	msg := watchChangedMessage(rev)
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	for c := range h.users[userID] {
+		if from != "" && c.clientID == from {
+			continue
+		}
 		if !c.enqueue(msg) {
 			go c.shutdown()
 		}
@@ -295,6 +301,8 @@ func (s *Server) handleWatch(w http.ResponseWriter, r *http.Request) {
 
 	client.userID = userID
 	client.tokenHash = hashToken(first.Token)
+	// 客户端标识只用于跳过自身回环广播；缺失或非法时按「未知」处理，照常接收通知。
+	client.clientID = normalizeClientID(first.ClientID)
 	s.hub.add(client)
 	defer s.hub.remove(client)
 

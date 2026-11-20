@@ -6,9 +6,14 @@ export type WatchPhase = 'off' | 'connecting' | 'connected' | 'retrying' | 'unsu
 /** 同步状态，供设置页展示；同步失败只影响这里，不阻塞聊天。 */
 export type SyncState = {
   phase: 'disabled' | 'idle' | 'syncing' | 'error' | 'authRequired'
+  /**
+   * syncing 阶段细分：push=后台上传本地变更，pull=核对/拉取云端变更。
+   * push 结束时 pending 已归零，若继续复用上传百分比会一直停在 100%，看起来像卡住。
+   */
+  stage: 'push' | 'pull' | null
   lastSyncedAt: number
   pending: number
-  /** 本轮同步开始时待上传的条目数，作为进度分母；0 表示当前没有上传任务 */
+  /** 本轮同步开始时待上传的条目数，作为进度分母；0 表示没有上传任务或已进入拉取阶段 */
   pendingTotal: number
   errorKey: string | null
   conflictCount: number
@@ -17,6 +22,7 @@ export type SyncState = {
 
 const initial: SyncState = {
   phase: 'disabled',
+  stage: null,
   lastSyncedAt: 0,
   pending: 0,
   pendingTotal: 0,

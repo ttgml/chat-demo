@@ -260,6 +260,7 @@ export const en = {
   syncStatusIdle: 'Synced',
   syncStatusSyncing: 'Syncing',
   syncStatusSyncingPercent: 'Syncing {percent}%',
+  syncStatusPulling: 'Checking cloud changes',
   syncStatusError: 'Sync failed',
   syncStatusAuthRequired: 'Session expired, please sign in again',
   syncStatusNever: 'Never synced',

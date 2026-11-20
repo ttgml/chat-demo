@@ -24,9 +24,11 @@ type Server struct {
 
 // notifyChange 在事务提交后调用，只推送新游标，不推会话内容。
 // 判空是为了让不关心实时通知的测试/调用方无需构造 hub。
-func (s *Server) notifyChange(userID string, rev int64) {
+// from 是发起写入的客户端标识；服务端不会把这次变更再推回它自己，
+// 否则客户端每传一批都会收到自己的回环通知，排队跑一遍完整同步。
+func (s *Server) notifyChange(userID string, rev int64, from string) {
 	if s.hub != nil {
-		s.hub.notify(userID, rev)
+		s.hub.notify(userID, rev, from)
 	}
 }
 
@@ -417,7 +419,7 @@ func (s *Server) handlePutSession(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	s.notifyChange(userID, newRev)
+	s.notifyChange(userID, newRev, clientIDOf(r))
 	writeJSON(w, http.StatusOK, map[string]any{"rev": newRev})
 }
 
@@ -594,7 +596,7 @@ func (s *Server) handlePutSessions(w http.ResponseWriter, r *http.Request) {
 	}
 	if len(applied) > 0 {
 		// 一批只广播一次：其它设备收到后仍走增量拉取，不需要逐条通知。
-		s.notifyChange(userID, newRev)
+		s.notifyChange(userID, newRev, clientIDOf(r))
 	}
 	writeJSON(w, http.StatusOK, putSessionsResponse{Results: results})
 }
@@ -657,7 +659,7 @@ func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	s.notifyChange(userID, newRev)
+	s.notifyChange(userID, newRev, clientIDOf(r))
 	writeJSON(w, http.StatusOK, map[string]any{"rev": newRev})
 }
 
@@ -730,7 +732,7 @@ func (s *Server) handleDeleteSessions(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	s.notifyChange(userID, newRev)
+	s.notifyChange(userID, newRev, clientIDOf(r))
 	writeJSON(w, http.StatusOK, map[string]any{"rev": newRev, "deleted": count})
 }
 
@@ -779,7 +781,7 @@ func (s *Server) handlePutFile(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	s.notifyChange(userID, newRev)
+	s.notifyChange(userID, newRev, clientIDOf(r))
 	writeJSON(w, http.StatusOK, map[string]any{"rev": newRev})
 }
 

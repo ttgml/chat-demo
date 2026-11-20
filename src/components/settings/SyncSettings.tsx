@@ -136,6 +136,11 @@ export const SyncSettings = () => {
       case 'disabled':
         return t('syncStatusDisabled')
       case 'syncing': {
+        // push 结束后的拉取阶段没有可计数的上传进度：用固定文案，
+        // 否则界面会停在「正在同步 100%」，让人误以为已经同步完成。
+        if (status.stage === 'pull') {
+          return t('syncStatusPulling')
+        }
         // 首次同步上千条时会停留很久：用上传百分比代替队列总数，进度会随每批完成前进。
         // 只有拉取、没有待上传条目时百分比无意义，直接显示「正在同步」。
         const percent = syncProgressPercent(status)

@@ -246,6 +246,7 @@ export const zh = {
   syncStatusIdle: '已同步',
   syncStatusSyncing: '正在同步',
   syncStatusSyncingPercent: '正在同步 {percent}%',
+  syncStatusPulling: '正在核对云端变更',
   syncStatusError: '同步失败',
   syncStatusAuthRequired: '登录已失效，请重新登录',
   syncStatusNever: '尚未同步',

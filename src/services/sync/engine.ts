@@ -77,11 +77,41 @@ let watch: WatchController | null = null
 let watchTimer = 0
 /** 每次页面会话只做一次遗留漏同步修复，避免每轮同步都扫描全部会话。 */
 let backfilled = false
+/** 是否已有同步任务在排队或执行；用于把并发请求合并成一轮 */
+let syncActive = false
+/** 执行期间又收到同步请求：本轮结束后补跑一次即可，不必排队 N 个完整同步 */
+let syncRequested = false
 
 const enqueue = (run: () => Promise<void>): Promise<void> => {
   const task = syncQueue.then(run)
   syncQueue = task.catch(() => {})
   return task
+}
+
+/**
+ * 请求一轮同步，并把并发请求合并掉。
+ *
+ * 首次上传上千条会话会被切成几十批，每批提交后服务端都会广播一次变更；
+ * 若每个通知都独立 enqueue(syncOnce)，上传结束后队列里还压着几十个完整同步，
+ * 状态会一直停在「同步中」。这里改成：已有同步在排队/执行时只记一个标记，
+ * 等当前这轮跑完再补跑一轮，额外同步最多 1 次。
+ */
+const requestSync = (): Promise<void> => {
+  if (syncActive) {
+    syncRequested = true
+    return syncQueue
+  }
+  syncActive = true
+  return enqueue(async () => {
+    try {
+      do {
+        syncRequested = false
+        await syncOnce()
+      } while (syncRequested && !stopped)
+    } finally {
+      syncActive = false
+    }
+  })
 }
 
 const isUnauthorized = (error: unknown): boolean =>
@@ -774,13 +804,19 @@ const backfillMissingSessions = async (): Promise<void> => {
  * 会把刚设置的 authRequired 覆盖掉，用户只能看到「未启用」而不知道需要重新登录。 */
 const showSyncUnavailable = (resetPending: boolean) => {
   if (useSyncStatus.getState().phase === 'authRequired') {
-    setSyncStatus({ phase: 'authRequired', errorKey: 'syncErrorAuth' })
+    setSyncStatus({
+      phase: 'authRequired',
+      stage: null,
+      errorKey: 'syncErrorAuth',
+      pendingTotal: 0,
+    })
     return
   }
   setSyncStatus({
     phase: 'disabled',
+    stage: null,
     errorKey: null,
-    ...(resetPending ? { pending: 0 } : {}),
+    ...(resetPending ? { pending: 0, pendingTotal: 0 } : {}),
   })
 }
 
@@ -806,7 +842,7 @@ const syncOnce = async (): Promise<void> => {
     scheduleRetry()
     return
   }
-  setSyncStatus({ phase: 'syncing', errorKey: null })
+  setSyncStatus({ phase: 'syncing', stage: 'push', errorKey: null })
   try {
     const key = syncAccountKey(useSyncConfig.getState())
     const localRev = await getLastSyncedRev()
@@ -830,11 +866,16 @@ const syncOnce = async (): Promise<void> => {
     // 这个数量也是本轮同步进度百分比的分母，push 会随着每批完成把 pending 推小。
     setSyncStatus({ pendingTotal: await updatePendingCount() })
     const pushConflicts = await push()
+    // push 结束即上传完成。清零进度分母并切到拉取阶段：否则界面会停在
+    // 「正在同步 100%」，让用户以为同步已完成，实际还在核对云端变更。
+    setSyncStatus({ pendingTotal: 0, stage: 'pull' })
     const pullResult = await pull()
     let conflicts = pushConflicts + pullResult.overwritten
     // pull 判定本地版本更新并重新排了队，立刻再推一轮，不等下一次定时或推送通知
     if (pullResult.localWins > 0) {
+      setSyncStatus({ stage: 'push' })
       conflicts += await push()
+      setSyncStatus({ stage: 'pull' })
     }
     const pending = await listPending()
     if (conflicts > 0) {
@@ -842,6 +883,7 @@ const syncOnce = async (): Promise<void> => {
     }
     setSyncStatus({
       phase: 'idle',
+      stage: null,
       lastSyncedAt: Date.now(),
       pending: pending.length,
       pendingTotal: 0,
@@ -852,10 +894,15 @@ const syncOnce = async (): Promise<void> => {
   } catch (error) {
     if (isUnauthorized(error)) {
       clearSyncCredentials()
-      setSyncStatus({ phase: 'authRequired', errorKey: 'syncErrorAuth' })
+      setSyncStatus({
+        phase: 'authRequired',
+        stage: null,
+        errorKey: 'syncErrorAuth',
+        pendingTotal: 0,
+      })
       return
     }
-    setSyncStatus({ phase: 'error', errorKey: syncErrorKey(error), pendingTotal: 0 })
+    setSyncStatus({ phase: 'error', stage: null, errorKey: syncErrorKey(error), pendingTotal: 0 })
     scheduleRetry()
   }
 }
@@ -876,7 +923,7 @@ const scheduleRetry = () => {
   }
   retryTimer = window.setTimeout(() => {
     retryTimer = 0
-    void enqueue(syncOnce)
+    void requestSync()
   }, retryDelay)
   retryDelay = Math.min(retryDelay * 2, MAX_BACKOFF_MS)
 }
@@ -889,7 +936,7 @@ const scheduleSync = () => {
   window.clearTimeout(debounceTimer)
   debounceTimer = window.setTimeout(() => {
     debounceTimer = 0
-    void enqueue(syncOnce)
+    void requestSync()
   }, DEBOUNCE_MS)
 }
 
@@ -904,7 +951,7 @@ const scheduleWatchSync = () => {
   window.clearTimeout(watchTimer)
   watchTimer = window.setTimeout(() => {
     watchTimer = 0
-    void enqueue(syncOnce)
+    void requestSync()
   }, WATCH_DEBOUNCE_MS)
 }
 
@@ -940,7 +987,7 @@ const handleChange = (event: ChatChangeEvent) => {
             await clearAllPending()
             await updatePendingCount()
             if (syncReady(useSyncConfig.getState())) {
-              await syncOnce()
+              requestSync()
             }
             return
           }
@@ -951,7 +998,7 @@ const handleChange = (event: ChatChangeEvent) => {
       }
       await reconcile(fromImport ? { resetPending: true, tombstones: false, origin: 'import' } : {})
       if (syncReady(useSyncConfig.getState())) {
-        await syncOnce()
+        requestSync()
       }
     })
     return
@@ -984,17 +1031,16 @@ const handleChange = (event: ChatChangeEvent) => {
 }
 
 /** 手动触发同步（设置页按钮） */
-export const syncNow = (): Promise<void> => enqueue(syncOnce)
+export const syncNow = (): Promise<void> => requestSync()
 
 /** 开启/关闭同步，或账号变更后调用 */
-export const refreshSyncState = (): Promise<void> =>
-  enqueue(async () => {
-    if (!syncReady(useSyncConfig.getState())) {
-      showSyncUnavailable(true)
-      return
-    }
-    await syncOnce()
-  })
+export const refreshSyncState = (): Promise<void> => {
+  if (!syncReady(useSyncConfig.getState())) {
+    // 仍走队列：正在进行的同步结束后再写「未启用」，避免被它覆盖。
+    return enqueue(async () => showSyncUnavailable(true))
+  }
+  return requestSync()
+}
 
 /** 应用启动时绑定：变更监听、实时推送、定时对账、切回前台时补一次 */
 export const startSync = (): (() => void) => {
@@ -1008,7 +1054,12 @@ export const startSync = (): (() => void) => {
     onNotify: scheduleWatchSync,
     onAuthFailure: () => {
       clearSyncCredentials()
-      setSyncStatus({ phase: 'authRequired', errorKey: 'syncErrorAuth' })
+      setSyncStatus({
+        phase: 'authRequired',
+        stage: null,
+        errorKey: 'syncErrorAuth',
+        pendingTotal: 0,
+      })
     },
   })
   watch.update(useSyncConfig.getState())
@@ -1023,12 +1074,12 @@ export const startSync = (): (() => void) => {
       void refreshSyncState()
     }
   })
-  pollTimer = window.setInterval(() => void enqueue(syncOnce), POLL_INTERVAL_MS)
+  pollTimer = window.setInterval(() => void requestSync(), POLL_INTERVAL_MS)
   const onVisible = () => {
     if (document.visibilityState === 'visible') {
       // 后台期间推送连接可能被系统挂起，立刻恢复并补拉一次。
       watch?.retryNow()
-      void enqueue(syncOnce)
+      void requestSync()
     }
   }
   document.addEventListener('visibilitychange', onVisible)
