@@ -1,14 +1,14 @@
 # chat-demo
 
-English | [简体中文](README.zh-CN.md)
+[English](README.en.md) | 简体中文
 
-A static chat demo powered by the DeepSeek API. No application backend is required: the browser connects directly to the configured API service.
+基于 DeepSeek API 的静态聊天示例。无需应用后端，浏览器直接请求配置的 API 服务。
 
-You can [try the app online](https://ttgml.github.io/chat-demo/) or download the archive from [Releases](https://github.com/ttgml/chat-demo/releases), extract it, and double-click `index.html` to use it locally without installation or a build. Enter your API key in Settings before your first chat.
+点击 [在线体验](https://ttgml.github.io/chat-demo/) 即可使用，也可以前往 [Releases](https://github.com/ttgml/chat-demo/releases) 下载压缩包，解压后双击 `index.html` 在本地使用，无需安装或构建。首次使用时，请在设置中填写 API Key。
 
-## Getting started
+## 运行
 
-Install Node.js 22.12+ and pnpm, then run:
+准备 Node.js 22.12+ 和 pnpm：
 
 ```sh
 git clone https://github.com/ttgml/chat-demo.git
@@ -17,66 +17,66 @@ pnpm install
 pnpm dev
 ```
 
-Open http://localhost:8090.
+打开 http://localhost:8090 。
 
-To build the static site:
+生成静态产物：
 
 ```sh
 pnpm build
 ```
 
-The output is written to `dist/`. Deploy it to a static web server or open `dist/index.html` directly. Opening the file directly requires browser support for storage on `file://` pages and an API service that permits their cross-origin requests.
+产物位于 `dist/`，可部署到静态服务器，也可直接打开 `dist/index.html`。直接打开时，浏览器和 API 服务需允许 `file://` 页面的存储与跨域请求。
 
-## Features
+## 功能
 
-- Multiple conversations with automatic titles, pinning, renaming, and deletion; edit prompts, regenerate replies, and switch between message branches.
-- Search chat history from the sidebar by title or content, and open a result directly.
-- Streaming replies, deep thinking, smart search, link reading, and source citations; stop generation or continue eligible replies.
-- Upload, paste, or drag and drop attachments; use voice input and read replies aloud. A live audio spectrum appears in the first row of the input area while recording on mobile.
-- Markdown, syntax highlighting, KaTeX math, and Mermaid diagrams.
-- Simplified Chinese and English, light and dark themes, mobile layouts, location settings, and chat history import and export.
+- 多会话、自动标题、置顶、重命名与删除；编辑提问、重新生成和切换消息分支。
+- 侧边栏搜索对话历史，匹配标题与正文，点击结果直接打开对话。
+- 流式回答、深度思考、智能搜索、链接阅读与来源引用；支持停止和符合条件的继续生成。
+- 附件上传、粘贴与拖拽，语音输入和回复朗读；移动端录音时输入框首行显示实时频谱。
+- Markdown、代码高亮、KaTeX 公式和 Mermaid 图表。
+- 简体中文与英文、浅色与深色主题、移动端布局、位置设置、历史导入导出。
 
-## Data and storage
+## 数据
 
-Your API key and settings are stored in the browser's localStorage. Conversations and original attachments are stored in IndexedDB. Local data is isolated by browser profile and site origin. Sending messages, uploading attachments, and using speech features sends the relevant content to the configured API service.
+API Key 和设置保存在浏览器 localStorage，会话及附件原件保存在 IndexedDB，本地数据按浏览器用户配置和站点源（origin）隔离。发送对话、上传附件和使用语音功能时，相应内容会提交给配置的 API 服务。
 
-History import and export in Settings use ZIP archives. After confirmation and successful validation, importing replaces all local conversations and attachments. Exports include conversations and locally available original images, but exclude API keys, settings, and original non-image attachments. See the [history import/export documentation (Chinese)](src/services/chat/history/README.md) for the archive format and preservation details.
+设置中的历史导入导出使用 ZIP 格式。导入会在确认并校验成功后替换全部本地会话和附件；导出包含会话与本地可用的图片原件，不包含 API Key、设置或非图片附件原件。格式与保留范围见[历史导入导出](src/services/chat/history/README.md)。
 
-Settings → Data → Delete all chats clears all local conversations, original attachments, and unsent drafts after confirmation. It stops ongoing replies and returns to a new chat. Your API key and settings are preserved; files already uploaded to the API service are not deleted. When cloud sync is signed in, the deletion is also synced to the server; when signed out, only the local sync state is reset, and the next sign-in pulls conversations back from the server instead of deleting them there. Deleting a single conversation while signed out is local-only as well and is restored from the server on the next sign-in; single deletions while signed in still sync normally.
+设置 → 数据管理 → 删除所有对话，会在确认后清空全部本地会话、附件原件和未发送的草稿，停止正在生成的回复并回到新对话。API Key 和其他设置保留，已上传到 API 服务的文件不受影响。云同步已登录时，这次删除也会同步到服务器；已退出登录时只重置本地同步进度，下次登录会重新从服务器拉取会话，不会删除云端数据。退出登录时单独删除某个会话同样只影响本地，重新登录会从服务器恢复；已登录时的单独删除仍会正常同步。
 
-### Cloud sync (optional)
+### 云同步（可选）
 
-Settings → Cloud sync accepts a sync server address and a username/password to sync conversations and original images across devices. Signing in enables sync automatically; while signed in, the server address and username are read-only, so sign out first to switch accounts (signing out asks for confirmation and keeps local conversations, which then sync to the new account). This is an **optional external service**: without it the app remains fully local, and local storage is unchanged. When enabled, conversations are uploaded to that server and isolated per account. Writes from other devices are pushed over WebSocket and pulled in immediately; if a long-lived connection is unavailable (older server or a proxy blocking upgrades), the settings page shows the reason and the app falls back to scheduled sync automatically. See [sync-server](sync-server/README.md) for troubleshooting.
+设置 → 云同步 可以填入同步服务地址和用户名密码，在多台设备间同步会话与图片原件。登录成功后自动开启同步，已登录时服务器地址与用户名只读，如需更换账号请先退出登录（退出需二次确认为红色危险操作，本地对话会保留并同步到新账号）。这是**可选的外部服务**，不启用时应用仍完全离线可用，本地存储方式不变；启用后聊天记录会上传到该服务器，由服务器按账号隔离。启用后其它设备的写入会通过 WebSocket 实时通知并自动拉取；若长连接不可用（旧版服务端或代理未放行），设置页会显示具体状态并自动退回定时同步，不影响离线可用；排查步骤见 [sync-server](sync-server/README.md)。
 
-The sync server can be self-hosted or used as a hosted instance; both run the same code. See [sync-server](sync-server/README.md). Sync uses the lossless native session format and is a separate pipeline from the ZIP import/export above — the ZIP format is unchanged and remains compatible with other apps. Only the login token is persisted, never the password. With an HTTP address, passwords and conversations travel in plaintext, so enable HTTPS for public deployments.
+同步服务可自行部署，也可以使用托管实例，两者是同一份代码：见 [sync-server](sync-server/README.md)。同步使用本地会话的无损原生格式，与上面的 ZIP 导入导出是两条独立链路——ZIP 格式保持不变，仍可与其他 app 互通。同步凭据只保存登录 token，密码不落盘；使用 HTTP 地址时密码与对话内容会明文传输，公网部署请务必启用 HTTPS。
 
-## Development
+## 开发
 
-| Command       | Description                  |
-| ------------- | ---------------------------- |
-| `pnpm dev`    | Start the development server |
-| `pnpm build`  | Build into `dist/`           |
-| `pnpm type`   | Run TypeScript type checks   |
-| `pnpm lint`   | Lint with oxlint             |
-| `pnpm format` | Format with oxfmt            |
+| 命令          | 用途                |
+| ------------- | ------------------- |
+| `pnpm dev`    | 启动开发服务器      |
+| `pnpm build`  | 构建到 `dist/`      |
+| `pnpm type`   | TypeScript 类型检查 |
+| `pnpm lint`   | oxlint 检查         |
+| `pnpm format` | oxfmt 格式化        |
 
-[rspack.config.ts](rspack.config.ts) uses `https://api.deepseek.com` by default. Use `createConfig({ apiOrigin, devServer })` to customize the API origin and development server proxy.
+[rspack.config.ts](rspack.config.ts) 默认连接 `https://api.deepseek.com`。`createConfig({ apiOrigin, devServer })` 支持自定义 API 地址和开发服务器代理。
 
-Chat uses `deepseek-flash` by default through Anthropic-compatible Messages / Files APIs. Speech features use ASR / TTS endpoints. Requests include extensions for search, link reading, titles, and `latest_reminder`, so the configured service must support the corresponding capabilities. Supported attachment formats are determined by server-side validation.
+聊天默认使用 `deepseek-flash`，通过 Anthropic 兼容的 Messages / Files API 通信；语音使用 ASR / TTS 接口。请求使用搜索、链接阅读、标题和 `latest_reminder` 等扩展，接入服务需支持相应能力。附件实际支持的格式以服务端校验为准。
 
 ```text
 src/
-  app/                 Application layout, themes, and global styles
-  components/          Chat, settings, Markdown, and other UI components
-  i18n/                English and Chinese translations
+  app/                 应用布局、主题与全局样式
+  components/          聊天、设置、Markdown 等界面组件
+  i18n/                中英文文案
   services/
-    api/               API requests, SSE, and protocol types
-    chat/              Conversations, message branches, storage, and history import/export
-    markdown/          Markdown parsing, syntax highlighting, and diagrams
-    speech/            Audio recording and read-aloud playback
-  utils/               Shared utilities
+    api/               API 请求、SSE 与协议类型
+    chat/              会话、消息分支、本地存储与历史导入导出
+    markdown/          Markdown 解析、代码高亮与图表
+    speech/            录音与朗读
+  utils/               通用工具
 ```
 
-## License
+## 许可证
 
-[MIT](LICENSE). The build copies the license to `dist/LICENSE`; include it when distributing the app. Third-party dependencies are subject to their own licenses.
+[MIT](LICENSE)。构建会将许可证复制到 `dist/LICENSE`，分发时请一并保留；第三方依赖遵循各自的许可证。
