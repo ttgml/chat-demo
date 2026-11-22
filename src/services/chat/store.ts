@@ -17,7 +17,7 @@ import {
   useUploads,
 } from '../attachments.js'
 import { useSettings } from '../settings.js'
-import { appendBranch, getVisibleMessages, normalizeSession, selectVersion } from './branches.js'
+import { appendBranch, deleteRound, getVisibleMessages, normalizeSession, restoreRoundDelete, selectVersion, type RoundDeletePatch } from './branches.js'
 import * as db from './db.js'
 import {
   clearAllDrafts,
@@ -108,6 +108,8 @@ type ChatState = {
   activeId: string | null
   /** 正在生成回复的会话 */
   streaming: Record<string, AbortController>
+  /** 可撤销的删除；只对当前会话有效，超时或会话有其它改动后清空 */
+  undo: { sessionId: string } | null
 }
 
 export const useChatStore = create<ChatState>(() => ({
@@ -120,6 +122,7 @@ export const useChatStore = create<ChatState>(() => ({
   sessionSaveErrors: {},
   activeId: null,
   streaming: {},
+  undo: null,
 }))
 
 const { getState: get, setState: set } = useChatStore
@@ -194,7 +197,47 @@ const trimSessionCache = () => {
   }
 }
 
-const updateSession = (id: string, update: (session: Session) => Session) =>
+/** 删除后的可撤销窗口；窗口结束后才清理不再被引用的附件原件。 */
+const UNDO_WINDOW = 5000
+
+/** 最近一次删除的逆操作补丁；只活在这个窗口里，刷新后不再可撤销。 */
+let pendingUndo: {
+  sessionId: string
+  patch: RoundDeletePatch
+  fileIds: string[]
+  timer: number
+} | null = null
+
+/** 丢掉撤销入口；`pruneFiles` 为真时顺带清理这次删除留下的孤儿原件。 */
+const clearPendingUndo = (pruneFiles: boolean) => {
+  const entry = pendingUndo
+  if (!entry) {
+    return
+  }
+  window.clearTimeout(entry.timer)
+  pendingUndo = null
+  set({ undo: null })
+  if (pruneFiles) {
+    void db.pruneFiles(entry.fileIds).catch(db.reportStorageError('prune deleted files'))
+  }
+}
+
+const setPendingUndo = (sessionId: string, patch: RoundDeletePatch, fileIds: string[]) => {
+  const entry = { sessionId, patch, fileIds, timer: 0 }
+  entry.timer = window.setTimeout(() => {
+    if (pendingUndo === entry) {
+      clearPendingUndo(true)
+    }
+  }, UNDO_WINDOW)
+  pendingUndo = entry
+  set({ undo: { sessionId } })
+}
+
+const updateSession = (id: string, update: (session: Session) => Session) => {
+  // 补丁只对删除那一刻的树成立：会话随后有任何改动就不再提供撤销。
+  if (pendingUndo?.sessionId === id) {
+    clearPendingUndo(true)
+  }
   set((state) => {
     const previous = Object.hasOwn(state.sessionCache, id) ? state.sessionCache[id] : undefined
     if (!previous) {
@@ -215,7 +258,7 @@ const updateSession = (id: string, update: (session: Session) => Session) =>
           ),
     }
   })
-
+}
 const updateReply = (sessionId: string, reply: AssistantMessage) =>
   updateSession(sessionId, (session) => ({
     ...session,
@@ -471,6 +514,8 @@ export const replaceHistory = async (
     unsavedSessions.clear()
     pendingFiles.clear()
     clearAllDrafts()
+    // 全量替换后旧会话的删除已经无从撤销，原件也已不存在。
+    clearPendingUndo(false)
     set({
       ready: true,
       initError: false,
@@ -705,6 +750,10 @@ const removeSessionData = async (id: string): Promise<boolean> => {
     unsavedSessions.delete(id)
     pendingFiles.delete(id)
     clearDraft(id)
+    // 会话没了，它的撤销入口也要一起收走；原件由 deleteSession 统一清理。
+    if (pendingUndo?.sessionId === id) {
+      clearPendingUndo(false)
+    }
     set((state) => ({
       sessions: state.sessions.filter((session) => session.id !== id),
       sessionCache: Object.fromEntries(
@@ -965,6 +1014,55 @@ export const selectMessageVersion = (sessionId: string, messageId: string) => {
   }
   updateSession(sessionId, (session) => selectVersion(session, messageId))
   persist(sessionId)
+}
+
+/**
+ * 删除消息所在的一整轮：提问、它的回答、该提问的其它版本及其后续分支都从会话里移除，
+ * 被删回答之后的对话接上一轮。删除后 5 秒内可撤销，窗口结束才清理不再被引用的附件原件。
+ */
+export const deleteMessageRound = (sessionId: string, messageId: string): boolean => {
+  if (get().importingHistory || deletingSessions.has(sessionId) || getStreamController(sessionId)) {
+    return false
+  }
+  const session = getSession(sessionId)
+  if (!session) {
+    return false
+  }
+  const deletion = deleteRound(session, messageId)
+  if (!deletion) {
+    return false
+  }
+  const fileIds = [
+    ...new Set(
+      deletion.patch.removed.flatMap(({ message }) =>
+        message.role === 'user' ? message.files.map((file) => file.id) : []
+      )
+    ),
+  ]
+  // 先清掉上一次的撤销入口（并清理它的原件），再落下这次删除。
+  clearPendingUndo(true)
+  updateSession(sessionId, () => ({ ...deletion.session, updatedAt: Date.now() }))
+  setPendingUndo(sessionId, deletion.patch, fileIds)
+  persist(sessionId)
+  return true
+}
+
+/** 撤销最近一次删除：把消息插回原位置并还原分支链接，随后重新落盘。 */
+export const undoDelete = (): boolean => {
+  const entry = pendingUndo
+  if (!entry || get().importingHistory || deletingSessions.has(entry.sessionId)) {
+    return false
+  }
+  const { sessionId, patch } = entry
+  // 原件在窗口结束前一直留着，撤销时不需要重新读取。
+  clearPendingUndo(false)
+  updateSession(sessionId, (session) => ({
+    ...restoreRoundDelete(session, patch),
+    // 撤销同样是内容变化，保持 updatedAt 单调，避免被同步当作旧版本覆盖。
+    updatedAt: Date.now(),
+  }))
+  persist(sessionId)
+  return true
 }
 
 /** 继续最后一条未完成的回答：保留原消息与开关，仅将新流的内容追加到原块之后。 */

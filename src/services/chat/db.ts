@@ -176,6 +176,35 @@ export const deleteSession = async (sessionId: string): Promise<string[]> => {
   return removedFiles
 }
 
+/**
+ * 删除不再被任何会话引用的本地原件。引用关系以已落盘的会话摘要索引为准：
+ * 会话尚未保存成功时索引仍引用它们，因此这里不会误删。
+ */
+export const pruneFiles = async (ids: readonly string[]): Promise<void> => {
+  const unique = [...new Set(ids)]
+  if (unique.length === 0) {
+    return
+  }
+  const tx = (await getDB()).transaction(['sessionSummaries', 'files'], 'readwrite')
+  await Promise.all([
+    (async () => {
+      try {
+        const summaries = tx.objectStore('sessionSummaries')
+        const files = tx.objectStore('files')
+        for (const id of unique) {
+          if ((await summaries.index('fileIds').count(id)) === 0) {
+            await files.delete(id)
+          }
+        }
+      } catch (error) {
+        abortTransaction(tx)
+        throw error
+      }
+    })(),
+    tx.done,
+  ])
+}
+
 const putFiles = async (store: 'files' | 'filesStaging', files: StoredFile[]) => {
   const tx = (await getDB()).transaction(store, 'readwrite')
   await Promise.all([...files.map((file) => tx.store.put(file)), tx.done])
