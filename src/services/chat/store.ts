@@ -19,7 +19,9 @@ import {
 import { useSettings } from '../settings.js'
 import {
   appendBranch,
+  buildExtractedSession,
   deleteRound,
+  deleteRounds,
   getVisibleMessages,
   normalizeSession,
   restoreRoundDelete,
@@ -277,47 +279,49 @@ const updateReply = (sessionId: string, reply: AssistantMessage) =>
     ),
   }))
 
-const persist = (sessionId: string) => {
+/** 落盘一个会话；返回的 Promise 用于需要等本次写入完成后才能做的事（如清理孤儿原件）。 */
+const persist = (sessionId: string): Promise<void> => {
   const session = getSession(sessionId)
-  if (session) {
-    unsavedSessions.add(sessionId)
-    if (deletingSessions.has(sessionId)) {
-      return
-    }
-    const epoch = historyEpoch
-    const files = pendingFiles.get(sessionId)
-    void db
-      .saveSession(session, files)
-      .then(() => {
-        if (epoch !== historyEpoch || !getSession(sessionId)) {
-          return
-        }
-        if (pendingFiles.get(sessionId) === files) {
-          pendingFiles.delete(sessionId)
-        }
-        if (getSession(sessionId) === session) {
-          unsavedSessions.delete(sessionId)
-          set((state) => ({
-            sessionSaveErrors: Object.fromEntries(
-              Object.entries(state.sessionSaveErrors).filter(([id]) => id !== sessionId)
-            ),
-          }))
-          trimSessionCache()
-        }
-        // 流式生成中的中间态不上传；回复结束后还会再落盘一次，届时再排队。
-        if (!Object.hasOwn(get().streaming, sessionId)) {
-          emitChatChange({ type: 'upsert', id: sessionId })
-        }
-      })
-      .catch((error: unknown) => {
-        db.reportStorageError('save session')(error)
-        if (epoch === historyEpoch && getSession(sessionId)) {
-          set((state) => ({
-            sessionSaveErrors: { ...state.sessionSaveErrors, [sessionId]: true },
-          }))
-        }
-      })
+  if (!session) {
+    return Promise.resolve()
   }
+  unsavedSessions.add(sessionId)
+  if (deletingSessions.has(sessionId)) {
+    return Promise.resolve()
+  }
+  const epoch = historyEpoch
+  const files = pendingFiles.get(sessionId)
+  return db
+    .saveSession(session, files)
+    .then(() => {
+      if (epoch !== historyEpoch || !getSession(sessionId)) {
+        return
+      }
+      if (pendingFiles.get(sessionId) === files) {
+        pendingFiles.delete(sessionId)
+      }
+      if (getSession(sessionId) === session) {
+        unsavedSessions.delete(sessionId)
+        set((state) => ({
+          sessionSaveErrors: Object.fromEntries(
+            Object.entries(state.sessionSaveErrors).filter(([id]) => id !== sessionId)
+          ),
+        }))
+        trimSessionCache()
+      }
+      // 流式生成中的中间态不上传；回复结束后还会再落盘一次，届时再排队。
+      if (!Object.hasOwn(get().streaming, sessionId)) {
+        emitChatChange({ type: 'upsert', id: sessionId })
+      }
+    })
+    .catch((error: unknown) => {
+      db.reportStorageError('save session')(error)
+      if (epoch === historyEpoch && getSession(sessionId)) {
+        set((state) => ({
+          sessionSaveErrors: { ...state.sessionSaveErrors, [sessionId]: true },
+        }))
+      }
+    })
 }
 
 export const retrySaveSessions = () => {
@@ -1070,6 +1074,88 @@ export const undoDelete = (): boolean => {
     updatedAt: Date.now(),
   }))
   persist(sessionId)
+  return true
+}
+
+/** 一组消息引用的附件 id。 */
+const userFileIds = (messages: readonly Message[]) => {
+  const ids = new Set<string>()
+  for (const message of messages) {
+    if (message.role === 'user') {
+      for (const file of message.files) {
+        ids.add(file.id)
+      }
+    }
+  }
+  return ids
+}
+
+/**
+ * 批量删除多轮：与单轮删除同一套树规则，但保护方式是删除前的确认弹窗，因此不写撤销入口。
+ * 不再被任何消息引用的附件原件在本次落盘完成后清理；落盘失败时原件仍在，索引天然会保住它们。
+ */
+export const deleteMessageRounds = (sessionId: string, messageIds: readonly string[]): boolean => {
+  if (get().importingHistory || deletingSessions.has(sessionId) || getStreamController(sessionId)) {
+    return false
+  }
+  const session = getSession(sessionId)
+  if (!session || messageIds.length === 0) {
+    return false
+  }
+  const next = deleteRounds(session, messageIds)
+  if (!next) {
+    return false
+  }
+  const kept = userFileIds(next.messages)
+  const removedFiles = [...userFileIds(session.messages)].filter((id) => !kept.has(id))
+  updateSession(sessionId, () => ({ ...next, updatedAt: Date.now() }))
+  void persist(sessionId).then(() =>
+    db.pruneFiles(removedFiles).catch(db.reportStorageError('prune deleted files'))
+  )
+  return true
+}
+
+/**
+ * 把选中的轮次另存为一条新会话：只新增，原会话与当前打开的会话都不变，新会话也不打开。
+ * 生成中的回复在副本里按“已停止”收尾，与复制会话一致。
+ */
+export const extractSession = async (
+  sessionId: string,
+  messageIds: readonly string[]
+): Promise<boolean> => {
+  if (get().importingHistory || deletingSessions.has(sessionId) || getStreamController(sessionId)) {
+    return false
+  }
+  const session = getSession(sessionId)
+  if (!session || messageIds.length === 0) {
+    return false
+  }
+  const epoch = historyEpoch
+  const now = Date.now()
+  const extracted = buildExtractedSession(session, messageIds, now)
+  if (!extracted) {
+    return false
+  }
+  const messages = extracted.messages.map(
+    (message): Message =>
+      message.role === 'assistant' &&
+      (message.status === 'pending' || message.status === 'streaming')
+        ? settleReply(message, 'stopped', now)
+        : message
+  )
+  const created: Session = { ...extracted, messages }
+  try {
+    await db.saveSession(created)
+  } catch (error) {
+    db.reportStorageError('save extracted session')(error)
+    return false
+  }
+  // 写入期间可能发生了全量替换或原会话被删除，这两种情况都不再把新会话加进列表。
+  if (epoch !== historyEpoch || deletingSessions.has(sessionId)) {
+    return false
+  }
+  set((state) => ({ sessions: sortSessions([...state.sessions, toSessionSummary(created)]) }))
+  emitChatChange({ type: 'upsert', id: created.id })
   return true
 }
 
