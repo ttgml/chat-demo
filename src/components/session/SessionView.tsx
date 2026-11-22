@@ -77,7 +77,7 @@ export const SessionView = ({
         onToggleRound={toggleRound}
         onEnterSelection={enterSelection}
         footer={
-          <div className={styles.inputContainer}>
+          <div className={clsx(styles.inputContainer, selecting && styles.inputContainerSelecting)}>
             {selecting ? (
               <SelectionBar
                 sessionId={session.id}

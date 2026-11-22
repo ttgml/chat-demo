@@ -58,6 +58,19 @@
   );
 }
 
+/*
+ * 多选时输入框不显示，底部只剩一条动作条，没有自己的底色可盖住消息。
+ * 整条底部改成不透明，只在顶部的内边距（6px）里渐隐，按钮不会压在透明区上。
+ */
+.inputContainerSelecting {
+  background: linear-gradient(
+    to bottom,
+    transparent 0,
+    var(--dsw-alias-bg-base) 6px,
+    var(--dsw-alias-bg-base) 100%
+  );
+}
+
 .caveat {
   width: 100%;
   padding: 6px 0;
