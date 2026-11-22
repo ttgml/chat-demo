@@ -210,7 +210,8 @@ export const deleteRound = (original: Session, messageId: string): RoundDeletion
     session: {
       ...session,
       // 删的是根时，被上提的后续消息成为新的根；全删光时 rootMessageId 为 null。
-      rootMessageId: parentId === null ? (selectedChildId ?? null) : (session.rootMessageId ?? null),
+      rootMessageId:
+        parentId === null ? (selectedChildId ?? null) : (session.rootMessageId ?? null),
       messages,
     },
     patch: {

@@ -1,10 +1,15 @@
 import { useTranslate } from '../../i18n/index.js'
 import clsx from 'clsx'
 import { memo, useState } from 'react'
-import { IconRefreshOutline16, IconWarningOutline16 } from '../base/icons.js'
+import { IconRefreshOutline16, IconTrashOutline16, IconWarningOutline16 } from '../base/icons.js'
 import { describeReply } from '../../services/chat/describe.js'
 import { canContinueReply } from '../../services/chat/reply.js'
-import { continueReply, omitUnusableFiles, regenerateReply } from '../../services/chat/store.js'
+import {
+  continueReply,
+  deleteMessageRound,
+  omitUnusableFiles,
+  regenerateReply,
+} from '../../services/chat/store.js'
 import { stopReadAloud } from '../../services/speech/readAloud.js'
 import type { AssistantMessage as AssistantMessageType } from '../../services/chat/types.js'
 import { openSettings } from '../settings/settingsDialogState.js'
@@ -202,6 +207,16 @@ export const AssistantMessage = memo(function AssistantMessage({
               onClick={() => {
                 stopReadAloud()
                 regenerateReply(sessionId, message.id)
+              }}
+            />
+            <IconButton
+              icon={<IconTrashOutline16 />}
+              tooltip={t('deleteMessageRound')}
+              tooltipPlacement="bottom"
+              disabled={busy}
+              onClick={() => {
+                stopReadAloud()
+                deleteMessageRound(sessionId, message.id)
               }}
             />
           </div>

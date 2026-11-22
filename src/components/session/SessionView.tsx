@@ -6,6 +6,7 @@ import { ChatInput } from '../chatInput/ChatInput.js'
 import { MessageList } from '../messages/MessageList.js'
 import { ContextUsage } from './ContextUsage.js'
 import { MobileHeader } from './MobileHeader.js'
+import { UndoBar } from './UndoBar.js'
 import styles from './SessionView.module.css'
 
 /** 会话页：标题栏（移动端为顶栏）+ 消息列表，输入框吸底 */
@@ -38,6 +39,7 @@ export const SessionView = ({
         streaming={streaming}
         footer={
           <div className={styles.inputContainer}>
+            <UndoBar sessionId={session.id} />
             <ChatInput sessionId={session.id} />
             <div className={styles.caveat}>{t('contentCaveat')}</div>
           </div>

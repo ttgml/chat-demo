@@ -2,9 +2,9 @@ import { useTranslate } from '../../i18n/index.js'
 import clsx from 'clsx'
 import { memo, useLayoutEffect, useRef, useState } from 'react'
 import { useIsMobile } from '../../app/viewport.js'
-import { IconEditOutline16 } from '../base/icons.js'
+import { IconEditOutline16, IconTrashOutline16 } from '../base/icons.js'
 import { getFileViewType, isImage } from '../../services/attachments.js'
-import { editMessage, retryUpload } from '../../services/chat/store.js'
+import { deleteMessageRound, editMessage, retryUpload } from '../../services/chat/store.js'
 import { stopReadAloud } from '../../services/speech/readAloud.js'
 import type { UserMessage as UserMessageType } from '../../services/chat/types.js'
 import { Button } from '../base/Button.js'
@@ -127,6 +127,16 @@ export const UserMessage = memo(function UserMessage({
                 onClick={() => {
                   setDraft(message.content)
                   setEditing(true)
+                }}
+              />
+              <IconButton
+                icon={<IconTrashOutline16 />}
+                tooltip={t('deleteMessageRound')}
+                tooltipPlacement="bottom"
+                disabled={busy}
+                onClick={() => {
+                  stopReadAloud()
+                  deleteMessageRound(sessionId, message.id)
                 }}
               />
             </div>

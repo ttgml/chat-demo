@@ -17,7 +17,15 @@ import {
   useUploads,
 } from '../attachments.js'
 import { useSettings } from '../settings.js'
-import { appendBranch, deleteRound, getVisibleMessages, normalizeSession, restoreRoundDelete, selectVersion, type RoundDeletePatch } from './branches.js'
+import {
+  appendBranch,
+  deleteRound,
+  getVisibleMessages,
+  normalizeSession,
+  restoreRoundDelete,
+  selectVersion,
+  type RoundDeletePatch,
+} from './branches.js'
 import * as db from './db.js'
 import {
   clearAllDrafts,
