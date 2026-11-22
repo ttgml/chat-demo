@@ -1,7 +1,12 @@
 import { useTranslate } from '../../i18n/index.js'
 import clsx from 'clsx'
 import { memo, useState } from 'react'
-import { IconRefreshOutline16, IconTrashOutline16, IconWarningOutline16 } from '../base/icons.js'
+import {
+  IconCheckOutline16,
+  IconRefreshOutline16,
+  IconTrashOutline16,
+  IconWarningOutline16,
+} from '../base/icons.js'
 import { describeReply } from '../../services/chat/describe.js'
 import { canContinueReply } from '../../services/chat/reply.js'
 import {
@@ -39,6 +44,8 @@ export const AssistantMessage = memo(function AssistantMessage({
   isLast,
   streaming,
   busy,
+  selectionMode,
+  onEnterSelection,
   versions,
   onSelectVersion,
 }: {
@@ -47,6 +54,9 @@ export const AssistantMessage = memo(function AssistantMessage({
   isLast: boolean
   streaming: boolean
   busy: boolean
+  /** 多选模式下由列表统一渲染勾选圈，消息自己不再渲染操作区 */
+  selectionMode: boolean
+  onEnterSelection: (messageId: string) => void
   versions: MessageVersions
   onSelectVersion: SelectMessageVersion
 }) {
@@ -190,7 +200,7 @@ export const AssistantMessage = memo(function AssistantMessage({
           </span>
         </div>
       ) : null}
-      {streaming ? null : (
+      {streaming || selectionMode ? null : (
         <div className={styles.bottom}>
           <BranchSwitcher versions={versions} disabled={busy} onSelect={onSelectVersion} />
           <div className={clsx(styles.actions, isLast && styles.alwaysShow)}>
@@ -218,6 +228,13 @@ export const AssistantMessage = memo(function AssistantMessage({
                 stopReadAloud()
                 deleteMessageRound(sessionId, message.id)
               }}
+            />
+            <IconButton
+              icon={<IconCheckOutline16 />}
+              tooltip={t('selectMessages')}
+              tooltipPlacement="bottom"
+              disabled={busy}
+              onClick={() => onEnterSelection(message.id)}
             />
           </div>
           {isLast && canContinueReply(message) ? (

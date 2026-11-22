@@ -35,3 +35,57 @@
   margin: 0 auto;
   padding-bottom: 24px;
 }
+
+/* 多选模式：每行左侧让出勾选圈的位置，整行可点 */
+.selectionRow {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 0 -8px;
+  padding: 0 8px;
+  border-radius: 12px;
+  cursor: pointer;
+
+  &:hover {
+    background-color: var(--dsw-alias-interactive-bg-hover);
+  }
+}
+
+.selectionRowSelected {
+  background-color: var(--dsw-alias-button-ghost-active-fill);
+}
+
+.selectionBody {
+  flex: 1;
+  min-width: 0;
+}
+
+.selectionCheck {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+  width: 20px;
+  height: 20px;
+  margin-top: 12px;
+  padding: 0;
+  border: 1.5px solid var(--dsw-alias-border-l3);
+  border-radius: 50%;
+  color: var(--dsw-alias-label-primary-foreground);
+  background-color: var(--dsw-alias-bg-base);
+  cursor: pointer;
+
+  > svg {
+    opacity: 0;
+  }
+}
+
+.selectionCheckSelected {
+  border-color: var(--dsw-alias-brand-primary);
+  background-color: var(--dsw-alias-brand-primary);
+
+  > svg {
+    opacity: 1;
+  }
+}

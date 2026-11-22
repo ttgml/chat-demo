@@ -1,8 +1,8 @@
 import { useTranslate } from '../../i18n/index.js'
 import clsx from 'clsx'
-import { memo, useLayoutEffect, useRef, useState } from 'react'
+import { memo, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { useIsMobile } from '../../app/viewport.js'
-import { IconEditOutline16, IconTrashOutline16 } from '../base/icons.js'
+import { IconCheckOutline16, IconEditOutline16, IconTrashOutline16 } from '../base/icons.js'
 import { getFileViewType, isImage } from '../../services/attachments.js'
 import { deleteMessageRound, editMessage, retryUpload } from '../../services/chat/store.js'
 import { stopReadAloud } from '../../services/speech/readAloud.js'
@@ -26,6 +26,8 @@ export const UserMessage = memo(function UserMessage({
   isFirst,
   isLast,
   busy,
+  selectionMode,
+  onEnterSelection,
   versions,
   onSelectVersion,
 }: {
@@ -36,6 +38,9 @@ export const UserMessage = memo(function UserMessage({
   isFirst: boolean
   isLast: boolean
   busy: boolean
+  /** 多选模式下由列表统一渲染勾选圈，消息自己不再渲染操作区 */
+  selectionMode: boolean
+  onEnterSelection: (messageId: string) => void
   versions: MessageVersions
   onSelectVersion: SelectMessageVersion
 }) {
@@ -45,6 +50,13 @@ export const UserMessage = memo(function UserMessage({
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const isMobile = useIsMobile()
   const canSend = !busy && (draft.trim() !== '' || message.files.length > 0)
+
+  // 进入多选时收起编辑器，避免在可选中的行里留下输入焦点。
+  useEffect(() => {
+    if (selectionMode) {
+      setEditing(false)
+    }
+  }, [selectionMode])
 
   useLayoutEffect(() => {
     const textarea = textareaRef.current
@@ -116,32 +128,41 @@ export const UserMessage = memo(function UserMessage({
       ) : (
         <>
           {message.content ? <div className={styles.bubble}>{message.content}</div> : null}
-          <div className={styles.bottom}>
-            <div className={clsx(styles.actions, isLast && styles.alwaysShow)}>
-              {message.content ? <CopyButton text={message.content} /> : null}
-              <IconButton
-                icon={<IconEditOutline16 />}
-                tooltip={t('editMessage')}
-                tooltipPlacement="bottom"
-                disabled={busy}
-                onClick={() => {
-                  setDraft(message.content)
-                  setEditing(true)
-                }}
-              />
-              <IconButton
-                icon={<IconTrashOutline16 />}
-                tooltip={t('deleteMessageRound')}
-                tooltipPlacement="bottom"
-                disabled={busy}
-                onClick={() => {
-                  stopReadAloud()
-                  deleteMessageRound(sessionId, message.id)
-                }}
-              />
+          {selectionMode ? null : (
+            <div className={styles.bottom}>
+              <div className={clsx(styles.actions, isLast && styles.alwaysShow)}>
+                {message.content ? <CopyButton text={message.content} /> : null}
+                <IconButton
+                  icon={<IconEditOutline16 />}
+                  tooltip={t('editMessage')}
+                  tooltipPlacement="bottom"
+                  disabled={busy}
+                  onClick={() => {
+                    setDraft(message.content)
+                    setEditing(true)
+                  }}
+                />
+                <IconButton
+                  icon={<IconTrashOutline16 />}
+                  tooltip={t('deleteMessageRound')}
+                  tooltipPlacement="bottom"
+                  disabled={busy}
+                  onClick={() => {
+                    stopReadAloud()
+                    deleteMessageRound(sessionId, message.id)
+                  }}
+                />
+                <IconButton
+                  icon={<IconCheckOutline16 />}
+                  tooltip={t('selectMessages')}
+                  tooltipPlacement="bottom"
+                  disabled={busy}
+                  onClick={() => onEnterSelection(message.id)}
+                />
+              </div>
+              <BranchSwitcher versions={versions} disabled={busy} onSelect={onSelectVersion} />
             </div>
-            <BranchSwitcher versions={versions} disabled={busy} onSelect={onSelectVersion} />
-          </div>
+          )}
         </>
       )}
     </div>

@@ -1,12 +1,16 @@
+import clsx from 'clsx'
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { useIsMobile } from '../../app/viewport.js'
+import { useTranslate } from '../../i18n/index.js'
 import {
   buildMessageVersions,
+  getRoundId,
   getVisibleMessages,
   type MessageVersions,
 } from '../../services/chat/branches.js'
 import { selectMessageVersion } from '../../services/chat/store.js'
 import type { Session } from '../../services/chat/types.js'
+import { IconCheckOutline16 } from '../base/icons.js'
 import { closeSearchPanel } from '../search/searchPanelState.js'
 import { AssistantMessage } from './AssistantMessage.js'
 import { ScrollToBottomContext } from './scrollContext.js'
@@ -36,12 +40,23 @@ const EMPTY_VERSIONS: MessageVersions = { ids: [], index: -1 }
 export const MessageList = ({
   session,
   streaming,
+  selecting,
+  selectedRounds,
+  onToggleRound,
+  onEnterSelection,
   footer,
 }: {
   session: Session
   streaming: boolean
+  /** 多选模式：每行左侧显示勾选圈，点行切换该轮的选中状态。 */
+  selecting: boolean
+  /** 已选轮 id 集合，轮 id 见 getRoundId */
+  selectedRounds: ReadonlySet<string>
+  onToggleRound: (roundId: string) => void
+  onEnterSelection: (messageId: string) => void
   footer: React.ReactNode
 }) => {
+  const t = useTranslate()
   const isMobile = useIsMobile()
   const scrollRef = useRef<HTMLDivElement>(null)
   const contentRef = useRef<HTMLDivElement>(null)
@@ -146,32 +161,69 @@ export const MessageList = ({
       <div ref={isMobile ? undefined : scrollRef} className={styles.container}>
         <div ref={isMobile ? scrollRef : undefined} className={styles.scroll}>
           <div ref={contentRef} className={styles.column}>
-            {messages.map((message, index) =>
-              message.role === 'user' ? (
-                <UserMessage
+            {messages.map((message, index) => {
+              const node =
+                message.role === 'user' ? (
+                  <UserMessage
+                    key={message.id}
+                    sessionId={session.id}
+                    message={message}
+                    retryUploadId={uploadRetryId}
+                    isFirst={index === 0}
+                    isLast={index === lastIndex || index === lastIndex - 1}
+                    busy={streaming}
+                    selectionMode={selecting}
+                    onEnterSelection={onEnterSelection}
+                    versions={versions.get(message.id) ?? EMPTY_VERSIONS}
+                    onSelectVersion={selectVersion}
+                  />
+                ) : (
+                  <AssistantMessage
+                    key={message.id}
+                    sessionId={session.id}
+                    message={message}
+                    isLast={index === lastIndex}
+                    streaming={streaming && index === lastIndex}
+                    busy={streaming}
+                    selectionMode={selecting}
+                    onEnterSelection={onEnterSelection}
+                    versions={versions.get(message.id) ?? EMPTY_VERSIONS}
+                    onSelectVersion={selectVersion}
+                  />
+                )
+              if (!selecting) {
+                return node
+              }
+              const roundId = getRoundId(message)
+              const selected = selectedRounds.has(roundId)
+              return (
+                <div
                   key={message.id}
-                  sessionId={session.id}
-                  message={message}
-                  retryUploadId={uploadRetryId}
-                  isFirst={index === 0}
-                  isLast={index === lastIndex || index === lastIndex - 1}
-                  busy={streaming}
-                  versions={versions.get(message.id) ?? EMPTY_VERSIONS}
-                  onSelectVersion={selectVersion}
-                />
-              ) : (
-                <AssistantMessage
-                  key={message.id}
-                  sessionId={session.id}
-                  message={message}
-                  isLast={index === lastIndex}
-                  streaming={streaming && index === lastIndex}
-                  busy={streaming}
-                  versions={versions.get(message.id) ?? EMPTY_VERSIONS}
-                  onSelectVersion={selectVersion}
-                />
+                  className={clsx(styles.selectionRow, selected && styles.selectionRowSelected)}
+                  onClick={(event) => {
+                    // 正文里的链接、按钮和编辑框保留原有行为，不让整行点击吞掉它们。
+                    if ((event.target as HTMLElement).closest('a, button, textarea, input')) {
+                      return
+                    }
+                    onToggleRound(roundId)
+                  }}
+                >
+                  <button
+                    type="button"
+                    className={clsx(
+                      styles.selectionCheck,
+                      selected && styles.selectionCheckSelected
+                    )}
+                    aria-pressed={selected}
+                    aria-label={t('selectMessage')}
+                    onClick={() => onToggleRound(roundId)}
+                  >
+                    <IconCheckOutline16 />
+                  </button>
+                  <div className={styles.selectionBody}>{node}</div>
+                </div>
               )
-            )}
+            })}
           </div>
         </div>
         {footer}
