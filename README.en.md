@@ -29,7 +29,7 @@ The output is written to `dist/`. Deploy it to a static web server or open `dist
 
 ## Features
 
-- Multiple conversations with automatic titles, pinning, renaming, duplication, and deletion; edit prompts, regenerate replies, and switch between message branches.
+- Multiple conversations with automatic titles, pinning, renaming, duplication, and deletion; edit prompts, regenerate replies, switch between message branches, and delete any exchange of a prompt and its reply (undoable for 5 seconds).
 - Search chat history from the sidebar by title or content, and open a result directly.
 - Streaming replies, deep thinking, smart search, link reading, and source citations; stop generation or continue eligible replies.
 - Upload, paste, or drag and drop attachments; use voice input and read replies aloud. A live audio spectrum appears in the first row of the input area while recording on mobile.
@@ -41,6 +41,7 @@ The output is written to `dist/`. Deploy it to a static web server or open `dist
 - **Storage**: the API key and settings live in localStorage; conversations and original attachments live in IndexedDB, isolated by browser profile and site origin. Sending messages, uploading attachments, or using speech features sends the relevant content to the configured API service.
 - **Import / export**: ZIP archives. Importing replaces all local conversations and attachments once validation passes, so export a backup first; exports include conversations and locally available original images, but no API keys, settings, or original non-image attachments. See the [history import/export documentation (Chinese)](src/services/chat/history/README.md) for the archive format.
 - **Deleting**: Settings → Data → Delete all chats clears local conversations, original attachments, and unsent drafts, and stops ongoing replies, but keeps your API key and settings and leaves files already uploaded to the API service untouched. Signed in to cloud sync, the deletion also syncs to the server; signed out, it only resets local state and the next sign-in pulls the data back — the same applies to deleting a single conversation.
+- **Deleting one exchange**: messages are deleted by exchange — clicking either the prompt or its reply removes both, along with the prompt's other versions and the conversations that follow those versions; what followed the deleted reply (including its hidden versions) attaches to the previous message, so the exchange disappears from both the thread and later requests. An undo bar sits above the input for 5 seconds (undo restores only what was deleted, never overwriting anything sent meanwhile); after that, local attachment originals that no message or conversation references are cleaned up. Deleting only edits conversation content, so cloud sync treats it as an ordinary conversation update.
 
 ### Cloud sync (optional)
 
