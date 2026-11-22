@@ -2,15 +2,22 @@ import clsx from 'clsx'
 import { memo, useState } from 'react'
 import { useTranslate } from '../../i18n/index.js'
 import {
+  IconCopyOutline16,
   IconEditOutline16,
   IconEllipsisOutline16,
   IconPinOutline16,
   IconTrashOutline16,
 } from '../base/icons.js'
-import { renameSession, selectSession, setSessionPinned } from '../../services/chat/store.js'
+import {
+  duplicateSession,
+  renameSession,
+  selectSession,
+  setSessionPinned,
+} from '../../services/chat/store.js'
 import { isPinned, type SessionSummary } from '../../services/chat/types.js'
 import { IconButton } from '../base/IconButton.js'
 import { Menu } from '../base/Menu.js'
+import { showToast } from '../base/toastState.js'
 import { closeMobileSider } from './mobileSiderState.js'
 import styles from './SessionItem.module.css'
 
@@ -83,6 +90,18 @@ export const SessionItem = memo(function SessionItem({
               label: t('sessionItemMenuRenameOption'),
               icon: <IconEditOutline16 />,
               onSelect: () => setEditing(true),
+            },
+            {
+              key: 'copy',
+              label: t('sessionItemMenuCopyOption'),
+              icon: <IconCopyOutline16 />,
+              onSelect: () => {
+                void duplicateSession(session.id).then((copied) => {
+                  if (!copied) {
+                    showToast({ key: 'sessionCopyFailed', type: 'error' })
+                  }
+                })
+              },
             },
             {
               key: 'delete',

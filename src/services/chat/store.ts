@@ -606,6 +606,74 @@ export const setSessionPinned = (id: string, pinned: boolean) => {
 }
 
 /**
+ * 复制会话：生成一条内容相同的新会话，包含全部消息与历史版本，分支关系按新消息 id 重建。
+ * 附件原件按 id 共享，不重复写入本地；副本不置顶，时间取复制时刻，因此排在「今天」分组最前。
+ * 生成中的回复在副本里按「已停止」收尾，原会话继续输出；当前打开的会话不变。
+ */
+export const duplicateSession = async (id: string): Promise<boolean> => {
+  if (get().importingHistory || deletingSessions.has(id)) {
+    return false
+  }
+  const epoch = historyEpoch
+  let source = getSession(id)
+  if (!source) {
+    try {
+      source = await db.loadSession(id)
+    } catch (error) {
+      db.reportStorageError('read session to copy')(error)
+      return false
+    }
+  }
+  // 读取期间可能已开始全量替换，或会话已被删除；列表里已没有它时不再复制。
+  if (
+    !source ||
+    epoch !== historyEpoch ||
+    deletingSessions.has(id) ||
+    !get().sessions.some((session) => session.id === id)
+  ) {
+    return false
+  }
+  const now = Date.now()
+  const original = normalizeSession(source)
+  const messageIds = new Map(original.messages.map((message) => [message.id, createId()]))
+  const mapId = (messageId: string | null | undefined) =>
+    messageId == null ? messageId : (messageIds.get(messageId) ?? null)
+  const messages = original.messages.map((message): Message => {
+    const copied: Message = {
+      ...message,
+      id: messageIds.get(message.id) ?? createId(),
+      parentId: mapId(message.parentId),
+      // selectedChildId 只有 undefined 一种「没有下一条」的写法
+      selectedChildId: mapId(message.selectedChildId) ?? undefined,
+    }
+    return copied.role === 'assistant' &&
+      (copied.status === 'pending' || copied.status === 'streaming')
+      ? settleReply(copied, 'stopped', now)
+      : copied
+  })
+  const copy: Session = {
+    id: createId(),
+    title: `${source.title || translate('untitledChat')}${translate('sessionCopyTitleSuffix')}`,
+    createdAt: now,
+    updatedAt: now,
+    messages,
+    rootMessageId: mapId(original.rootMessageId),
+  }
+  try {
+    await db.saveSession(copy)
+  } catch (error) {
+    db.reportStorageError('copy session')(error)
+    return false
+  }
+  if (epoch !== historyEpoch) {
+    return false
+  }
+  set((state) => ({ sessions: sortSessions([...state.sessions, toSessionSummary(copy)]) }))
+  emitChatChange({ type: 'upsert', id: copy.id })
+  return true
+}
+
+/**
  * 删除会话；本地原件仅在没有其他会话引用时清理。远端文件不删：导入、编辑、重新生成都会复用同一个附件，
  * 同一服务端文件可能被多个会话引用，不维护引用计数。
  */

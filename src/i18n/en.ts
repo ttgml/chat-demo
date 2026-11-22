@@ -40,6 +40,7 @@ export const en = {
   sessionSaveFailed:
     'Chats or attachments have not been saved locally. Retry before closing this page.',
   sessionDeleteFailed: 'Unable to delete this chat. Please try again.',
+  sessionCopyFailed: 'Unable to copy this chat. Please try again.',
   settings: 'Settings',
   appName: 'API usage demo',
   deleteSessionModalContentTitle: 'Delete chat?',
@@ -50,6 +51,8 @@ export const en = {
   sessionItemMenuRenameOption: 'Rename',
   sessionItemMenuPinOption: 'Pin to top',
   sessionItemMenuUnpinOption: 'Unpin',
+  sessionItemMenuCopyOption: 'Copy chat',
+  sessionCopyTitleSuffix: ' · Copy',
   more: 'More',
   close: 'Close',
   sessionHistoryTimelineLabelPinned: 'Pinned',
