@@ -5,7 +5,8 @@
   gap: 12px;
   box-sizing: border-box;
   width: 100%;
-  padding: 6px 0;
+  /* 输入框在这一模式下不显示，底部留出一段，按钮不至于贴住视口边缘 */
+  padding: 6px 0 24px;
 }
 
 .count {
