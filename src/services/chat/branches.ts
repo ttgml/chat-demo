@@ -1,3 +1,4 @@
+import { createId } from '../../utils/id.js'
 import type { Message, Session } from './types.js'
 
 /** 将线性消息列表规范化为单分支，保留消息 ID、内容及时间。 */
@@ -242,5 +243,101 @@ export const restoreRoundDelete = (session: Session, patch: RoundDeletePatch): S
         ? { ...message, selectedChildId: patch.selection.selectedChildId }
         : message
     }),
+  }
+}
+
+/** 一轮的标识：提问的 id；没有提问的回答用自身 id。 */
+export const getRoundId = (message: Message): string =>
+  message.role === 'user' ? message.id : (message.parentId ?? message.id)
+
+/** 当前可见路径上的顺序；不在路径上的 id 排到最后。 */
+const pathOrder = (session: Session) => {
+  const index = new Map(getVisibleMessages(session).map((message, order) => [message.id, order]))
+  return (id: string) => index.get(id) ?? Number.MAX_SAFE_INTEGER
+}
+
+/**
+ * 批量删除多轮：按可见路径顺序逐个套用 {@link deleteRound}。
+ * 每一轮都是“摘掉这一轮、后面上提一轮”，因此相邻、跳选、首尾轮同时选中都成立。
+ * 返回 null 表示一个都删不了。
+ */
+export const deleteRounds = (original: Session, messageIds: readonly string[]): Session | null => {
+  const order = pathOrder(original)
+  const targets = [...new Set(messageIds)].sort((a, b) => order(a) - order(b))
+  let session: Session | null = null
+  for (const id of targets) {
+    const deletion = deleteRound(session ?? original, id)
+    if (deletion) {
+      session = deletion.session
+    }
+  }
+  return session
+}
+
+/** 新会话标题：首条选中提问的正文，其次它的附件名；都没有时留空，由界面显示“未命名对话”。 */
+const extractedTitle = (messages: readonly Message[]) => {
+  const first = messages.find(
+    (message): message is Extract<Message, { role: 'user' }> => message.role === 'user'
+  )
+  const text = first?.content.replace(/\s+/g, ' ').trim() ?? ''
+  return text ? (text.length > 30 ? `${text.slice(0, 30)}…` : text) : (first?.files[0]?.name ?? '')
+}
+
+/**
+ * 把选中的轮次另存为一条线性新会话：每轮取“提问 + 当前回答”，按原顺序重排消息 ID 串成一条链。
+ * 附件文件 ID 不变，与本地原件和服务端文件共用；选中轮次的隐藏版本不复制。
+ */
+export const buildExtractedSession = (
+  original: Session,
+  messageIds: readonly string[],
+  now: number
+): Session | null => {
+  const session = normalizeSession(original)
+  const byId = new Map(session.messages.map((message) => [message.id, message]))
+  const order = pathOrder(session)
+  const picked: Message[] = []
+  const rounds = new Set<string>()
+  for (const id of [...new Set(messageIds)].sort((a, b) => order(a) - order(b))) {
+    const message = byId.get(id)
+    if (!message) {
+      continue
+    }
+    // 点回答时以它的提问为准，两种点法都得到同一轮；没有提问的回答单独成一轮。
+    const question =
+      message.role === 'user' ? message : message.parentId ? byId.get(message.parentId) : undefined
+    const roundId = question && question.role === 'user' ? question.id : message.id
+    if (rounds.has(roundId)) {
+      continue
+    }
+    rounds.add(roundId)
+    if (!question) {
+      picked.push(message)
+      continue
+    }
+    picked.push(question)
+    const answer = question.selectedChildId ? byId.get(question.selectedChildId) : undefined
+    if (answer) {
+      picked.push(answer)
+    }
+  }
+  if (picked.length === 0) {
+    return null
+  }
+  const ids = new Map(picked.map((message) => [message.id, createId()]))
+  const messages = picked.map(
+    (message, index): Message => ({
+      ...message,
+      id: ids.get(message.id) ?? createId(),
+      parentId: index === 0 ? null : (ids.get(picked[index - 1].id) ?? null),
+      selectedChildId: index + 1 < picked.length ? ids.get(picked[index + 1].id) : undefined,
+    })
+  )
+  return {
+    id: createId(),
+    title: extractedTitle(messages),
+    createdAt: now,
+    updatedAt: now,
+    rootMessageId: messages[0].id,
+    messages,
   }
 }
