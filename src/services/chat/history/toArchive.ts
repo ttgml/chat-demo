@@ -9,6 +9,7 @@ import {
   type Session,
   type UserMessage,
 } from '../types.js'
+import { getContextTokens } from '../usage.js'
 import { fail } from './errors.js'
 import type {
   ChatMessage,
@@ -204,15 +205,6 @@ const replyStatus = ({ status, stopReason }: AssistantMessage): ChatMessageStatu
   }
 }
 
-/** 最近一次请求的输入（含缓存）与输出之和，即这一条结束时的上下文 token。 */
-const contextTokens = ({ usage }: AssistantMessage) =>
-  usage
-    ? usage.input_tokens +
-      usage.cache_creation_input_tokens +
-      usage.cache_read_input_tokens +
-      usage.output_tokens
-    : 0
-
 /** 消息按父节点优先重新编号为 1…n，保证 parent_id 小于 id。 */
 const numberMessages = (messages: Message[]) => {
   const byId = new Map(messages.map((message) => [message.id, message]))
@@ -256,7 +248,7 @@ export const toSessionFile = (original: Session, exportImage: ExportImage): Sess
       status: message.role === 'user' ? 'FINISHED' : replyStatus(message),
       thinking_enabled: reply?.thinking ?? false,
       search_enabled: reply?.search ?? false,
-      accumulated_token_usage: message.role === 'user' ? 0 : contextTokens(message),
+      accumulated_token_usage: message.role === 'user' ? 0 : (getContextTokens(message) ?? 0),
       inserted_at: iso(message.createdAt),
       fragments:
         message.role === 'user' ? userFragments(message, exportImage) : assistantFragments(message),

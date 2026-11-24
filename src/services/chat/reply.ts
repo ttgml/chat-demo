@@ -204,6 +204,10 @@ export const isUsableReply = (message: Message): message is AssistantMessage =>
   !message.blocks.some((block) => block.type === 'text' && block.isTemplate) &&
   getReplyText(message) !== ''
 
+/** 有可用附件的提问才会带上文件块：没有 serverId 或已被移出上下文的不发送 */
+const hasContextFiles = (files: FileAttachment[]) =>
+  files.some(({ serverId, omitted }) => serverId && !omitted)
+
 /** 有文件时用内容块数组：先文件后文本，文件按 Files API 的 file_id 引用 */
 const toUserParam = ({ content, files }: UserMessage): MessageParam => {
   const blocks = toFileBlocks(files)
@@ -299,6 +303,34 @@ export const getContextRounds = (history: Message[]): [UserMessage, AssistantMes
   return rounds
 }
 
+/** 一轮真正进入请求的内容：提问、回复，以及这一轮插入的 latest_reminder 快照 */
+export type ContextRound = {
+  user: UserMessage
+  reply: AssistantMessage
+  reminder: string | null
+}
+
+/**
+ * 历史中真正进入请求的轮次，按请求顺序。
+ * 提问没有文字、附件也都没有 serverId 时提问为空，连同回答一起省略；
+ * latest_reminder 只在当前分支首次出现或内容变化时插入快照，缺少快照的消息保持原有内容。
+ */
+export const getContextRoundsWithReminders = (history: Message[]): ContextRound[] => {
+  const rounds: ContextRound[] = []
+  let previousReminder: string | undefined
+  for (const [user, reply] of getContextRounds(history)) {
+    // 提问没有文字、附件也都没有 serverId 时提问为空，连同回答一起省略。
+    if (!user.content && !hasContextFiles(user.files)) {
+      continue
+    }
+    const snapshot = reply.latestReminder
+    const changed = snapshot && snapshot !== previousReminder ? snapshot : null
+    previousReminder = snapshot ?? previousReminder
+    rounds.push({ user, reply, reminder: changed })
+  }
+  return rounds
+}
+
 /** 请求 messages 与它们的来源消息：latest_reminder 不对应本地消息 */
 type ContextBuild = { messages: MessageParam[]; messageIds: (string | null)[] }
 
@@ -309,20 +341,10 @@ const buildContextMessages = (history: Message[]): ContextBuild => {
     messages.push(message)
     messageIds.push(id)
   }
-  let previousReminder: string | undefined
-  const appendReminder = (reminder: string | undefined) => {
-    // 仅在当前分支首次出现或内容变化时插入快照；缺少快照的消息保持原有内容。
-    if (reminder && reminder !== previousReminder) {
+  for (const { user, reply, reminder } of getContextRoundsWithReminders(history)) {
+    if (reminder) {
       push({ role: 'latest_reminder', content: reminder }, null)
-      previousReminder = reminder
     }
-  }
-  for (const [user, reply] of getContextRounds(history)) {
-    // 历史提问没有文字、附件也都没有 serverId 时，提问为空，连同回答一起省略。
-    if (!user.content && toFileBlocks(user.files).length === 0) {
-      continue
-    }
-    appendReminder(reply.latestReminder)
     push(toUserParam(user), user.id)
     push(toAssistantParam(reply), reply.id)
   }

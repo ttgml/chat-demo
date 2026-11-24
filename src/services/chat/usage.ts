@@ -73,6 +73,20 @@ export const isPeakTime = (timestamp: number): boolean => {
   return PEAK_PERIODS.some(([start, end]) => time >= start && time < end)
 }
 
+/** 最近一次请求的输入（含缓存命中与写入）token；没有用量时返回 null。 */
+export const getPromptTokens = (message: AssistantMessage): number | null => {
+  const { usage } = message
+  return usage
+    ? usage.input_tokens + usage.cache_creation_input_tokens + usage.cache_read_input_tokens
+    : null
+}
+
+/** 最近一次请求的输入与输出之和，即这一条结束时的上下文 token；没有用量时返回 null。 */
+export const getContextTokens = (message: AssistantMessage): number | null => {
+  const prompt = getPromptTokens(message)
+  return prompt === null ? null : prompt + (message.usage?.output_tokens ?? 0)
+}
+
 const costOf = (
   price: Price,
   cacheHitTokens: number,
