@@ -14,9 +14,8 @@ export const en = {
   untitledChat: 'New chat',
   contextUsage: 'Context usage',
   contextUsageEstimate: 'Estimated',
-  contextUsageRemaining: 'Context remaining',
-  contextUsageTokens: 'tokens',
-  contextUsageUsedOfLimit: 'Used {used} / {limit} ({percent}%)',
+  contextUsageUsedPercent: 'Used {percent}%',
+  contextUsageTokensOfLimit: '{used} / {limit} tokens',
   contextUsageLow: 'Context is almost full. Consider starting a new chat.',
   contextUsageExceeded:
     'Context exceeds the model limit. The next request may fail. Consider starting a new chat.',

@@ -98,42 +98,47 @@
   line-height: 18px;
 }
 
-.remaining {
+.readout {
   display: flex;
   align-items: baseline;
-  gap: 6px;
-  margin-top: 2px;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 14px 0 6px;
   white-space: nowrap;
 }
 
-.remainingValue {
-  font-size: 24px;
-  font-weight: 600;
-  line-height: 30px;
+.percent {
+  color: var(--dsw-alias-label-secondary);
+  font-size: 12px;
   font-variant-numeric: tabular-nums;
 }
 
-.remainingLabel {
-  margin-top: 10px;
-  color: var(--dsw-alias-label-secondary);
-  font-size: 12px;
+.percent.percentWarning {
+  color: var(--dsw-static-amber-500);
 }
 
-.remainingUnit {
-  color: var(--dsw-alias-label-secondary);
-  font-size: 12px;
+.percent.percentDanger {
+  color: var(--dsw-alias-state-error-primary);
+}
+
+.tokens {
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
 }
 
 .bar {
-  height: 6px;
-  margin: 8px 0 8px;
+  height: 12px;
   overflow: hidden;
   border-radius: 999px;
-  background-color: var(--dsw-alias-bg-layer-3);
+  /* 用量条用边框色而不是层背景色：浅色主题下面板与层背景同为白色，轨道会看不见 */
+  background-color: var(--dsw-alias-border-l2);
 }
 
 .fill {
   height: 100%;
+  /* 用量极低时也留一段可见的弧长 */
+  min-width: 12px;
   border-radius: inherit;
   background-color: var(--dsw-alias-brand-primary);
   transition: width var(--ds-transition-duration) var(--ds-ease-in-out);
@@ -147,14 +152,8 @@
   background-color: var(--dsw-alias-state-error-primary);
 }
 
-.used {
-  color: var(--dsw-alias-label-secondary);
-  font-size: 12px;
-  font-variant-numeric: tabular-nums;
-}
-
 .warning {
-  margin-top: 6px;
+  margin-top: 10px;
   color: var(--dsw-alias-state-error-primary);
   font-size: 12px;
 }

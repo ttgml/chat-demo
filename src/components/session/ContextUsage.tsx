@@ -38,6 +38,12 @@ export const ContextUsage = ({ session }: { session: Session }) => {
         : undefined
   const barTone =
     level === 'danger' ? styles.fillDanger : level === 'warning' ? styles.fillWarning : undefined
+  const percentTone =
+    level === 'danger'
+      ? styles.percentDanger
+      : level === 'warning'
+        ? styles.percentWarning
+        : undefined
   const format = useMemo(() => new Intl.NumberFormat(locale).format, [locale])
   const { anchorRef, floatingRef, position } = useAnchoredPosition<HTMLSpanElement, HTMLDivElement>(
     open,
@@ -85,10 +91,16 @@ export const ContextUsage = ({ session }: { session: Session }) => {
                 </span>
                 <span className={styles.badge}>{t('contextUsageEstimate')}</span>
               </div>
-              <div className={styles.remainingLabel}>{t('contextUsageRemaining')}</div>
-              <div className={styles.remaining}>
-                <span className={styles.remainingValue}>{format(usage.remainingTokens)}</span>
-                <span className={styles.remainingUnit}>{t('contextUsageTokens')}</span>
+              <div className={styles.readout}>
+                <span className={clsx(styles.percent, percentTone)}>
+                  {t('contextUsageUsedPercent', { percent: percentText })}
+                </span>
+                <span className={styles.tokens}>
+                  {t('contextUsageTokensOfLimit', {
+                    used: format(usage.usedTokens),
+                    limit: format(usage.limitTokens),
+                  })}
+                </span>
               </div>
               <div
                 className={styles.bar}
@@ -98,13 +110,6 @@ export const ContextUsage = ({ session }: { session: Session }) => {
                 aria-valuenow={progress}
               >
                 <div className={clsx(styles.fill, barTone)} style={{ width: `${progress}%` }} />
-              </div>
-              <div className={styles.used}>
-                {t('contextUsageUsedOfLimit', {
-                  used: format(usage.usedTokens),
-                  limit: format(usage.limitTokens),
-                  percent: percentText,
-                })}
               </div>
               {level === 'danger' ? (
                 <div className={styles.warning}>

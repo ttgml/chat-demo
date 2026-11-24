@@ -39,7 +39,6 @@ const READ_LINK_TOKENS = 2_000
 export type ContextUsage = {
   usedTokens: number
   limitTokens: number
-  remainingTokens: number
   /** 已用比例，0–1 */
   ratio: number
 }
@@ -248,7 +247,6 @@ export const getContextUsage = (session: Session): ContextUsage => {
   return {
     usedTokens,
     limitTokens,
-    remainingTokens: Math.max(0, limitTokens - usedTokens),
     ratio: limitTokens > 0 ? usedTokens / limitTokens : 0,
   }
 }
