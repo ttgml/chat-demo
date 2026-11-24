@@ -90,4 +90,4 @@ export const createConfig = ({
 })
 
 // eslint-disable-next-line import/no-default-export
-export default defineConfig(createConfig())
+export default defineConfig(createConfig({ apiOrigin: process.env.API_ORIGIN }))
